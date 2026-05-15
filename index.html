@@ -1,0 +1,2429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Aruba Onboarder</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
+    body { background: #111827; min-height: 100vh; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+    #qr-reader { width: 100% !important; border: none !important; background: transparent !important; }
+    #qr-reader video { border-radius: 16px; width: 100% !important; object-fit: cover; }
+    #qr-reader__scan_region { background: transparent !important; }
+    #qr-reader__dashboard { display: none !important; }
+    #qr-reader__status_span { display: none !important; }
+    .step-enter { animation: slideIn 0.25s ease-out; }
+    @keyframes slideIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+    .spinner { border: 3px solid rgba(16,185,129,0.2); border-top: 3px solid #10b981; border-radius: 50%; width: 36px; height: 36px; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes shrinkWidth { from { width: 100%; } to { width: 0%; } }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 2px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+var HPE_LOGO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHsAAAAjCAYAAAC0GnXlAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAI8SURBVHgB7dpBctMwGAXgp0735AbVEXKE5ATAkl04Ad2yqjOwpzkBWXcDnCDmBuYEcU9A2EPF09gLholkRansyP6/mX/cGdl12jeSJTnKEBwUIQHecsHDztFc8rbLjusLHu6QTt1WxfrOz/MVkfhZ9zxoDG99BXGMZi1Yt6wvDOwn6zNLI2MSdpgZa8XaM/CUI0pSEvbpCtvLkSEJO84qx8Al7Hg28Ftk5BrjU7UVS/9TXe4Y+Jaz9QPi2Fl+7LWnquzSwAmJ2KWX57a7gOsLz/UFnoGdedsgTbei4/fsPddq9EiGcQf21pq14o/LjlPfIRMSdgcGXvKw9pwyM80mkUvtqV6N8Zmdwj2aHjxztM9Z5bGGrt3APknPDtBOwHyTPo0MSNjhHj1tL5ABGcYTUw8fdriAPXVlsPGGnXL5laEbT9svZ0sTtMbQlJnJMB5u7mnra2PkLBJ2AA5wK7hn4laJDEjYHRi07dHe15rtWvziSdgODNlultiQ7fat9py6RSbGOBt/yZBuEM8O17Y368Dz14imKqh+nvdPf1B3hb1FGhrN135SmMM/mXpOG7uHjkjm6fo13ryv0RNv2PxD3iKBdi95gbxV/P9k9T5bntlx7Nbpxex5h5KwT7dhLc/4wsJgZLs0XMla57LMOkbCdqvRBPyDtc2xJ/9vjGHbYfYe8Q5jCPaYMYZ9OGc5NGYyjA9IXf3+pB4+9jKKKGO+SdiDMq/6e4tsHmXpNSES9oRI2BMiYU+IhD0hfwF4Uz92paqz3wAAAABJRU5ErkJggg==";
+</script>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ── CONSTANTS ──────────────────────────────────────────────────────────────────
+
+const CLUSTERS = [
+  { label: 'EU-1',        id: 'eu1',        url: 'de1.api.central.arubanetworks.com' },
+  { label: 'EU-Central2', id: 'eu2',        url: 'de2.api.central.arubanetworks.com' },
+  { label: 'EU-Central3', id: 'eu3',        url: 'de3.api.central.arubanetworks.com' },
+  { label: 'UK',          id: 'uk1',        url: 'gb1.api.central.arubanetworks.com' },
+  { label: 'US-1',        id: 'us1',        url: 'us1.api.central.arubanetworks.com' },
+  { label: 'US-2',        id: 'us2',        url: 'us2.api.central.arubanetworks.com' },
+  { label: 'US-West-4',   id: 'us4',        url: 'us4.api.central.arubanetworks.com' },
+  { label: 'US-West-5',   id: 'us5',        url: 'us5.api.central.arubanetworks.com' },
+  { label: 'US-East-1',   id: 'us6',        url: 'us6.api.central.arubanetworks.com' },
+  { label: 'Canada-1',    id: 'ca1',        url: 'ca1.api.central.arubanetworks.com' },
+  { label: 'APAC-1',      id: 'apac1',      url: 'in1.api.central.arubanetworks.com' },
+  { label: 'APAC-East1',  id: 'apaceast1',  url: 'jp1.api.central.arubanetworks.com' },
+  { label: 'APAC-South1', id: 'apacsouth1', url: 'au1.api.central.arubanetworks.com' },
+  { label: 'UAE',         id: 'uae1',       url: 'ae1.api.central.arubanetworks.com' },
+  { label: 'China',       id: 'cn1',        url: 'cn1.api.central.arubanetworks.com.cn' },
+  { label: 'Internal',    id: 'internal',   url: 'internal.api.central.arubanetworks.com' },
+];
+
+const DEVICE_FUNCTIONS = [
+  { id: 'CAMPUS_AP',          label: 'Campus AP',           icon: '📡', desc: 'WLAN functionality' },
+  { id: 'MICROBRANCH_AP',     label: 'Microbranch AP',      icon: '📶', desc: 'SD-WAN-lite + WLAN' },
+  { id: 'BRANCH_GW',          label: 'Branch Gateway',      icon: '🌐', desc: 'SD-Branch LAN + WAN' },
+  { id: 'MOBILITY_GW',        label: 'Mobility Gateway',    icon: '🔁', desc: 'Overlay WLAN / LAN' },
+  { id: 'VPNC',               label: 'VPN Concentrator',    icon: '🔒', desc: 'VPN termination' },
+  { id: 'ACCESS_SWITCH',      label: 'Access Switch',       icon: '🔀', desc: 'AOS-CX access layer' },
+  { id: 'AGG_SWITCH',         label: 'Agg Switch',          icon: '🔗', desc: 'AOS-CX aggregation' },
+  { id: 'CORE_SWITCH',        label: 'Core Switch',         icon: '⚡', desc: 'AOS-CX core layer' },
+  { id: 'AOSS_ACCESS_SWITCH', label: 'AOS-S Access',        icon: '🔀', desc: 'AOS-S access layer' },
+  { id: 'AOSS_AGG_SWITCH',    label: 'AOS-S Agg',           icon: '🔗', desc: 'AOS-S aggregation' },
+  { id: 'AOSS_CORE_SWITCH',   label: 'AOS-S Core',          icon: '⚡', desc: 'AOS-S core layer' },
+  { id: 'BRIDGE',             label: 'Bridge',              icon: '🌉', desc: 'Bridge mode' },
+  { id: 'IOT',                label: 'IoT',                 icon: '💡', desc: 'IoT gateway' },
+  { id: 'HYBRID_NAC',         label: 'Hybrid NAC',          icon: '🛡️', desc: 'Hybrid NAC edge VM' },
+];
+
+// Subscription filtering: include/exclude keyword sets per device type.
+// Matching is case-insensitive on skuDescription.
+// Filter on subscriptionType (primary) with tier as fallback.
+// subscriptionType observed in API: CENTRAL_AP, CENTRAL_GW, CENTRAL_BRIDGE,
+//   UXI_SENSOR_CLOUD, UXI_SENSOR_LTE, CENTRAL_SWITCH* (exact value TBC).
+// tier observed: ADVANCED_AP, ADVANCE_70XX, FOUNDATION_BRIDGE, FOUNDATION_SENSOR_*,
+//   FOUNDATION_SWITCH_CX_CL1/2/3/4, etc.
+// Subscription filtering: include/exclude keyword sets per device type.
+// Matching checks (in order): subscriptionType prefix, tier field, skuDescription keyword.
+// The real GreenLake API may use types like FOUNDATION_SWITCH_CX_CL1 (not CENTRAL_SWITCH*),
+// so skuContains acts as a reliable final fallback.
+const SUBSCRIPTION_RULES = {
+  AP:      { typePrefixes: ['CENTRAL_AP'],     tierContains: '_AP',     skuContains: 'central ap' },
+  GATEWAY: { typePrefixes: ['CENTRAL_GW'],     tierContains: '_GW',     skuContains: 'gateway' },
+  SWITCH:  { typePrefixes: ['CENTRAL_SWITCH'], tierContains: 'SWITCH',  skuContains: 'switch' },
+  BRIDGE:  { typePrefixes: ['CENTRAL_BRIDGE'], tierContains: 'BRIDGE',  skuContains: 'bridge' },
+  UXI:     { typePrefixes: ['UXI_'],           tierContains: 'SENSOR',  skuContains: 'uxi' },
+  EP:      null, // show all
+};
+
+function filterSubscriptions(subs, deviceType) {
+  const rule = SUBSCRIPTION_RULES[deviceType];
+  if (!rule) return subs;
+  const filtered = subs.filter(sub => {
+    const type = (sub.subscriptionType || '').toUpperCase();
+    const tier = (sub.tier || '').toUpperCase();
+    const sku  = (sub.skuDescription || '').toLowerCase();
+    return rule.typePrefixes.some(p => type.startsWith(p))
+        || tier.includes(rule.tierContains)
+        || sku.includes(rule.skuContains);
+  });
+  // Sort: Advanced tier first, then by available quantity descending.
+  return filtered.sort((a, b) => {
+    const aAdv = (a.tier || '').toUpperCase().includes('ADVAN');
+    const bAdv = (b.tier || '').toUpperCase().includes('ADVAN');
+    if (aAdv !== bAdv) return aAdv ? -1 : 1;
+    return Number(b.availableQuantity || 0) - Number(a.availableQuantity || 0);
+  });
+}
+
+// Maps Central device_type → allowed persona IDs (matches Central UI logic)
+const PERSONA_BY_DEVICE_TYPE = {
+  AP:      ['CAMPUS_AP', 'MICROBRANCH_AP'],
+  GATEWAY: ['BRANCH_GW', 'MOBILITY_GW', 'VPNC'],
+  SWITCH:  ['ACCESS_SWITCH', 'AGG_SWITCH', 'CORE_SWITCH', 'AOSS_ACCESS_SWITCH', 'AOSS_AGG_SWITCH', 'AOSS_CORE_SWITCH'],
+  BRIDGE:  ['BRIDGE'],
+  EP:      ['IOT', 'HYBRID_NAC'],
+};
+
+// Maps GreenLake deviceType → app's internal type.
+// 'IAP' is an older GreenLake alias for access points.
+const GL_DEVICE_TYPE_MAP = {
+  AP:      'AP',
+  IAP:     'AP',
+  GATEWAY: 'GATEWAY',
+  SWITCH:  'SWITCH',
+  BRIDGE:  'BRIDGE',
+  SENSOR:  'UXI',
+  EP:      'EP',
+};
+
+// Human-readable labels and icons for each device type shown in the DeviceChip
+const DEVICE_TYPE_META = {
+  AP:      { label: 'Access Point', icon: '📡' },
+  GATEWAY: { label: 'Gateway',      icon: '🌐' },
+  SWITCH:  { label: 'Switch',       icon: '🔀' },
+  BRIDGE:  { label: 'Bridge',       icon: '📶' },
+  UXI:     { label: 'UXI Sensor',   icon: '📊' },
+  EP:      { label: 'Edge Device',  icon: '💻' },
+};
+
+const GL_BASE = 'https://global.api.greenlake.hpe.com';
+// Standard HPE SSO token endpoint (used for standalone GL or Central credentials)
+const TOKEN_URL = 'https://sso.common.cloud.hpe.com/as/token.oauth2';
+// Unified token endpoint — one token works for both GreenLake AND New Central.
+// Requires workspace_id embedded in the path.  Discovered via aruba/pycentral v2 SDK.
+const unifiedTokenUrl = workspaceId =>
+  `https://global.api.greenlake.hpe.com/authorization/v2/oauth2/${workspaceId}/token`;
+const delay = ms => new Promise(r => setTimeout(r, ms));
+
+// ── PROXY CALL ─────────────────────────────────────────────────────────────────
+// All API traffic goes through /proxy to avoid CORS
+async function proxyCall({ url, method = 'GET', token, body, contentType = 'application/json', extraHeaders = {} }) {
+  const headers = { ...extraHeaders };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (body) headers['Content-Type'] = contentType;
+
+  const res = await fetch('/proxy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      url,
+      method,
+      headers,
+      body: body ? (typeof body === 'string' ? body : JSON.stringify(body)) : undefined,
+    }),
+  });
+  return res;
+}
+
+// ── TOKEN MANAGER ──────────────────────────────────────────────────────────────
+// useBasicAuth=true: credentials go in Authorization: Basic header (required by the
+// unified GL endpoint, per aruba/pycentral v2 SDK which uses HTTPBasicAuth).
+// useBasicAuth=false (default): credentials in POST body (standard HPE SSO endpoint).
+async function fetchToken(clientId, clientSecret, label = '', tokenUrl = TOKEN_URL, useBasicAuth = false) {
+  let body, extraHeaders = {};
+  if (useBasicAuth) {
+    // Basic Auth: credentials in Authorization header per OAuth2 RFC 6749 §2.3.1
+    // Also include client_id in body — some servers require both (belt-and-suspenders)
+    extraHeaders['Authorization'] = `Basic ${btoa(`${clientId}:${clientSecret}`)}`;
+    body = `grant_type=client_credentials&client_id=${encodeURIComponent(clientId)}`;
+  } else {
+    body = `grant_type=client_credentials&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}`;
+  }
+  console.log(`[fetchToken] ${label || 'Token'} | url: ${tokenUrl} | basicAuth: ${useBasicAuth} | clientId: ${clientId?.substring(0,8)}…`);
+  const res = await proxyCall({
+    url: tokenUrl, method: 'POST',
+    contentType: 'application/x-www-form-urlencoded',
+    body, extraHeaders,
+  });
+  if (!res.ok) {
+    const txt = await res.text();
+    console.error(`[fetchToken] ${label} FAILED ${res.status}:`, txt);
+    // Provide actionable hint for the common "unauthorized_request" error
+    const isUnauthorizedReq = txt.includes('unauthorized_request');
+    const hint = isUnauthorizedReq
+      ? ' — Check: (1) Workspace ID matches your GreenLake tenant URL, (2) API credentials were created at the platform/workspace level (not application-scoped)'
+      : '';
+    throw new Error(`${label ? label + ' t' : 'T'}oken error ${res.status}: ${txt}${hint}`);
+  }
+  const d = await res.json();
+  console.log(`[fetchToken] ${label} OK — expires in ${d.expires_in}s`);
+  return { token: d.access_token, expiresAt: Date.now() + (d.expires_in - 60) * 1000 };
+}
+
+// ── ASYNC POLLER ───────────────────────────────────────────────────────────────
+async function pollAsync(operationUrl, token, maxAttempts = 30) {
+  for (let i = 0; i < maxAttempts; i++) {
+    await delay(2000);
+    const res = await proxyCall({ url: operationUrl, token });
+    if (!res.ok) throw new Error(`Poll error ${res.status}: ${await res.text()}`);
+    const d = await res.json();
+    console.log('[pollAsync]', operationUrl, JSON.stringify(d));
+    const status = (d.status || d.state || '').toUpperCase();
+    if (status === 'SUCCEEDED' || status === 'SUCCESS' || status === 'COMPLETED') return d;
+    if (status === 'FAILED' || status === 'ERROR') {
+      // Extract the most useful message from the async result payload
+      let msg = d.message || d.errorMessage || d.error;
+      if (!msg && Array.isArray(d.result?.failedDevices) && d.result.failedDevices.length) {
+        const fd = d.result.failedDevices[0];
+        msg = (fd.messages || []).join('; ') || fd.errorCode;
+      }
+      if (!msg && Array.isArray(d.result?.failedDevicesSerial) && d.result.failedDevicesSerial.length) {
+        msg = `Device already exists or could not be added: ${d.result.failedDevicesSerial.join(', ')}`;
+      }
+      if (!msg) msg = JSON.stringify(d.result || d);
+      const err = new Error(msg);
+      err.errorCode = d.result?.failedDevices?.[0]?.errorCode || '';
+      throw err;
+    }
+    // RUNNING / IN_PROGRESS → keep polling
+  }
+  throw new Error('Operation timed out');
+}
+
+// ── LIVE API ───────────────────────────────────────────────────────────────────
+const liveApi = {
+  // GreenLake: add device (v1 POST with nested network array, async)
+  async glAddDevice({ serial, mac, tags, locationId, token }) {
+    const deviceEntry = { serialNumber: serial };
+    if (mac) deviceEntry.macAddress = mac;
+    if (tags && Object.keys(tags).length > 0) deviceEntry.tags = tags;
+    if (locationId) deviceEntry.location = { id: locationId };
+    const body = { network: [deviceEntry], compute: [], storage: [] };
+
+    const addUrl = `${GL_BASE}/devices/v1/devices`;
+    const res = await proxyCall({ url: addUrl, method: 'POST', token, body });
+    if (res.status === 202) {
+      const loc = res.headers.get('location');
+      if (loc) {
+        try {
+          await pollAsync(`${GL_BASE}${loc}`, token);
+        } catch (pollErr) {
+          // Async add failed — most common cause is device already exists in GreenLake.
+          // Don't throw yet; fall through to the lookup below and use the existing record.
+          console.warn('[glAddDevice] async op failed — checking if device already exists:', pollErr.message);
+        }
+      }
+      // Brief pause — GreenLake sometimes needs a moment before the device
+      // is ready to accept PATCH operations after the initial add.
+      await delay(3000);
+      // Fetch the device by serial — works whether just added or already present
+      const devRes = await proxyCall({ url: `${GL_BASE}/devices/v1/devices?filter=serialNumber eq '${serial}'`, token });
+      if (!devRes.ok) throw new Error(`Could not retrieve device after add: ${devRes.status}`);
+      const d = await devRes.json();
+      const device = (d.items || [])[0];
+      if (!device) throw new Error(`Device add failed and device not found in GreenLake: ${serial}`);
+      console.log('[glAddDevice] using device:', device.id, '— assignedState:', device.assignedState, '| model:', device.model, '| partNumber:', device.partNumber);
+      // Explicitly PATCH location — the initial POST body may not link it reliably.
+      if (locationId && device.id) {
+        const locPatch = await proxyCall({
+          url: `${GL_BASE}/devices/v2beta1/devices?id=${encodeURIComponent(device.id)}`,
+          method: 'PATCH', token,
+          body: { location: { id: locationId } },
+        });
+        if (locPatch.status === 202) {
+          const locOp = locPatch.headers.get('location');
+          if (locOp) await pollAsync(`${GL_BASE}${locOp}`, token).catch(e => console.warn('[glAddDevice] location patch poll:', e.message));
+        } else if (!locPatch.ok) {
+          console.warn('[glAddDevice] location PATCH failed:', locPatch.status, await locPatch.text().catch(() => ''));
+        }
+      }
+      return device;
+    }
+    if (!res.ok) {
+      const errBody = await res.text();
+      // Auth failures: throw immediately — a device lookup would also fail.
+      if (res.status === 401 || res.status === 403) {
+        throw new Error(`Add device error ${res.status}: ${errBody}`);
+      }
+      // Any other failure (409 conflict, 400, 5xx…): the device may already
+      // exist in GreenLake. Try to find it by serial before giving up.
+      console.warn('[glAddDevice] POST returned', res.status, '— checking if device already exists in GreenLake…');
+      const lookupRes = await proxyCall({ url: `${GL_BASE}/devices/v1/devices?filter=serialNumber eq '${serial}'`, token });
+      if (lookupRes.ok) {
+        const ld = await lookupRes.json();
+        const existing = (ld.items || [])[0];
+        if (existing) {
+          console.log('[glAddDevice] found existing device:', existing.id, '— skipping add, updating attributes');
+          // Apply tags and location to the existing device — these were in the
+          // failed POST body but never sent.  Use the same PATCH pattern as new devices.
+          const patches = [];
+          if (tags && Object.keys(tags).length > 0) {
+            patches.push(
+              proxyCall({
+                url: `${GL_BASE}/devices/v2beta1/devices?id=${encodeURIComponent(existing.id)}`,
+                method: 'PATCH', token, body: { tags },
+              }).then(async r => {
+                if (r.status === 202) {
+                  const op = r.headers.get('location');
+                  if (op) await pollAsync(`${GL_BASE}${op}`, token).catch(e => console.warn('[glAddDevice] tags patch poll:', e.message));
+                } else if (!r.ok) {
+                  console.warn('[glAddDevice] tags PATCH failed:', r.status, await r.text().catch(() => ''));
+                }
+              })
+            );
+          }
+          if (locationId) {
+            patches.push(
+              proxyCall({
+                url: `${GL_BASE}/devices/v2beta1/devices?id=${encodeURIComponent(existing.id)}`,
+                method: 'PATCH', token, body: { location: { id: locationId } },
+              }).then(async r => {
+                if (r.status === 202) {
+                  const op = r.headers.get('location');
+                  if (op) await pollAsync(`${GL_BASE}${op}`, token).catch(e => console.warn('[glAddDevice] location patch poll:', e.message));
+                } else if (!r.ok) {
+                  console.warn('[glAddDevice] location PATCH failed:', r.status, await r.text().catch(() => ''));
+                }
+              })
+            );
+          }
+          if (patches.length) await Promise.all(patches);
+          return { ...existing, foundExisting: true };
+        }
+      }
+      // Device not found — surface the original POST error.
+      const allowHdr = res.headers.get('allow');
+      const wwwAuth  = res.headers.get('www-authenticate');
+      let msg = `Add device error ${res.status}: ${errBody}`;
+      if (allowHdr) msg += ` [Allow: ${allowHdr}]`;
+      if (wwwAuth)  msg += ` [WWW-Authenticate: ${wwwAuth}]`;
+      throw new Error(msg);
+    }
+    return res.json();
+  },
+
+  // GreenLake: list active subscriptions.
+  // Filter to subscriptionStatus eq 'STARTED' to exclude expired/inactive ones
+  // (status 'NONE') — assigning those causes GreenLake 500 errors.
+  // Do NOT filter on availableQuantity — some valid subscriptions report 0
+  // available in the API even though they can still be assigned (pooled/flex).
+  async glGetSubscriptions({ token }) {
+    // Decode the JWT to log which workspace/customer the token is scoped to.
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      console.log('[glGetSubscriptions] token claims:', {
+        sub: payload.sub, cid: payload.cid, iss: payload.iss,
+        workspace_id: payload.workspace_id, customer_id: payload.customer_id,
+        aud: payload.aud,
+      });
+    } catch (_) { console.warn('[glGetSubscriptions] could not decode token'); }
+
+    // Fetch all subscriptions without a status filter so nothing is silently
+    // excluded server-side.  We filter client-side by type/tier/sku instead.
+    const url = `${GL_BASE}/subscriptions/v1/subscriptions?limit=100`;
+    console.log('[glGetSubscriptions] GET', url);
+    const res = await proxyCall({ url, token });
+    if (!res.ok) throw new Error(`Subscriptions error ${res.status}`);
+    const d = await res.json();
+    // API returns snake_case: subscriptions[] + pagination, OR camelCase: items[] + total
+    const raw = d.items || d.subscriptions || [];
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+
+    // Helper: resolve expiration date from any known field name / format.
+    // Public GL API uses "endTime" (ISO string).
+    // Internal GL UI API nests it at appointments.subscription_end (Unix ms).
+    const resolveExpiry = s => {
+      if (s.endTime)        return new Date(s.endTime);        // ← public GL API
+      if (s.expirationDate) return new Date(s.expirationDate);
+      if (s.endDate)        return new Date(s.endDate);
+      if (s.expiry)         return new Date(s.expiry);
+      const apptEnd = s.appointments?.subscription_end;
+      if (apptEnd)          return new Date(typeof apptEnd === 'number' ? apptEnd : Number(apptEnd));
+      return null;
+    };
+
+    console.log(`[glGetSubscriptions] total=${d.total ?? d.pagination?.total_count} returned=${raw.length}`);
+
+    // Drop expired/ended subscriptions using all known status field names.
+    // The GreenLake public API uses snake_case: license_state_type: "Ended"
+    // Some clusters return camelCase equivalents. NONE/null = valid perpetual sub.
+    const DEAD_STATUSES = new Set(['ENDED', 'EXPIRED', 'TERMINATED', 'CANCELLED', 'CANCELED']);
+    const active = raw.filter(s => {
+      const key = s.subscriptionKey || s.subscription_key || s.key || '(unknown)';
+      // Check every possible status field name, camelCase and snake_case
+      const st = (
+        s.licenseStateType    || s.license_state_type ||
+        s.subscriptionStatus  || s.subscription_status ||
+        s.status || s.subscriptionState || s.state || ''
+      ).toUpperCase();
+      if (DEAD_STATUSES.has(st)) return false;
+      // Expiration date safety net (covers cases where status field is missing/null)
+      const exp = resolveExpiry(s);
+      if (exp && !isNaN(exp) && exp < today) return false;
+      return true;
+    });
+    console.log('[glGetSubscriptions] active after client filter:', active.length);
+
+    // Normalise to camelCase — handle both snake_case (real API) and camelCase fields.
+    return active.map(s => {
+      const exp = resolveExpiry(s);
+      return {
+        ...s,
+        id:               s.id                || s.subscriptionKey    || s.subscription_key || s.key,
+        key:              s.subscriptionKey   || s.subscription_key   || s.key              || s.id,
+        subscriptionType: s.subscriptionType  || s.subscription_type  || s.type             || '',
+        skuDescription:   s.skuDescription    || s.product_description || s.productDescription || s.productName || s.name || '',
+        tier:             s.tier              || s.subscription_tier_description || s.subscriptionTierDescription || '',
+        availableQuantity: s.availableQuantity ?? s.available_quantity ?? s.available ?? 0,
+        expirationDate:   exp ? exp.toISOString() : null,
+      };
+    });
+  },
+
+  // GreenLake: collect unique tag key/value pairs from existing devices.
+  // There is no standalone workspace tags endpoint — tags live on the devices themselves.
+  async glGetTags({ token }) {
+    const res = await proxyCall({ url: `${GL_BASE}/devices/v1/devices?limit=100`, token });
+    if (!res.ok) {
+      console.warn('[glGetTags] devices fetch failed:', res.status);
+      return [];
+    }
+    const d = await res.json();
+    const seen = new Set();
+    const tags = [];
+    for (const device of (d.items || [])) {
+      for (const [key, value] of Object.entries(device.tags || {})) {
+        const sig = `${key}::${value}`;
+        if (!seen.has(sig)) { seen.add(sig); tags.push({ key, value }); }
+      }
+    }
+    console.log('[glGetTags] extracted', tags.length, 'unique tag(s) from', (d.items || []).length, 'device(s)');
+    return tags;
+  },
+
+  // GreenLake: list locations
+  async glGetLocations({ token }) {
+    const res = await proxyCall({ url: `${GL_BASE}/locations/v1/locations?limit=100`, token });
+    if (!res.ok) return [];
+    const d = await res.json();
+    return d.items || [];
+  },
+
+  // GreenLake: list workspace users (identity v1)
+  async glGetUsers({ token }) {
+    const res = await proxyCall({ url: `${GL_BASE}/identity/v1/users?limit=100`, token });
+    if (!res.ok) return [];
+    const d = await res.json();
+    return d.items || [];
+  },
+
+  // GreenLake: invite / create a new user
+  async glInviteUser({ firstName, lastName, email, token }) {
+    const res = await proxyCall({
+      url: `${GL_BASE}/identity/v1/users`,
+      method: 'POST', token,
+      body: { email, profile: { firstName, lastName }, sendWelcomeEmail: true },
+    });
+    if (!res.ok) throw new Error(`Create user error ${res.status}: ${await res.text()}`);
+    return res.json();
+  },
+
+  // GreenLake: create location
+  async glCreateLocation({ name, address, token }) {
+    const body = {
+      name,
+      addresses: [{ streetaddress: address.street, city: address.city, state: address.state, postalCode: address.zip, country: address.country }],
+    };
+    const res = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body });
+    if (!res.ok) throw new Error(`Create location error ${res.status}: ${await res.text()}`);
+    return res.json();
+  },
+
+  // GreenLake: fetch provisioned services for this workspace.
+  // Step 1 — my-services: region-indexed list of provisioned service IDs + regions.
+  //   items[i] = { id: "region-id", provisions: [{ serviceManagerProvision: { serviceManager: {id}, region, provisionStatus } }] }
+  // Step 2 — for each unique service ID, fetch the service-manager record to get the display name.
+  async glGetApplications({ token }) {
+    const msRes = await proxyCall({ url: `${GL_BASE}/service-catalog/v1beta1/my-services`, token });
+    if (!msRes.ok) throw new Error(`Service catalog error ${msRes.status}: ${await msRes.text()}`);
+    const msData = await msRes.json();
+    console.log(`[glGetApplications] my-services: ${msData.items?.length ?? 0} services`);
+
+    // Extract { smId, region } pairs for all PROVISIONED entries
+    const provisioned = [];
+    for (const regionItem of (msData.items || [])) {
+      const regionId = regionItem.id;
+      for (const p of (regionItem.provisions || [])) {
+        const smp = p.serviceManagerProvision;
+        if (!smp) continue;
+        if (smp.provisionStatus && smp.provisionStatus !== 'PROVISIONED') continue;
+        const smId = smp.serviceManager?.id;
+        if (!smId) continue;
+        // Try common name fields first; if missing we'll fetch below
+        // serviceOffer.name (sibling of serviceManagerProvision) has the display name
+        const nameHint = p.serviceOffer?.name || smp.serviceManagerName || smp.serviceManager?.name || smp.name || null;
+        const smUri = smp.serviceManager?.resourceUri || null; // e.g. /service-catalog/v1beta1/service-managers/{id}
+        provisioned.push({ smId, nameHint, smUri, region: smp.region || regionId });
+      }
+    }
+
+    // Fetch display names for any entry that didn't have one inline
+    const nameCache = {};
+    await Promise.all(
+      provisioned
+        .filter(p => !p.nameHint)
+        .map(async p => {
+          if (nameCache[p.smId]) return;
+          try {
+            // Use the resourceUri from the response (v1beta1) rather than assuming v1
+            const fetchUrl = p.smUri ? `${GL_BASE}${p.smUri}` : `${GL_BASE}/service-catalog/v1beta1/service-managers/${p.smId}`;
+            const r = await proxyCall({ url: fetchUrl, token });
+            if (r.ok) {
+              const d = await r.json();
+              nameCache[p.smId] = d.name || d.id || p.smId;
+            }
+          } catch (_) { /* ignore — fall back to ID */ }
+          if (!nameCache[p.smId]) nameCache[p.smId] = p.smId;
+        })
+    );
+
+    const apps = provisioned.map(p => ({
+      id:     p.smId,
+      name:   p.nameHint || nameCache[p.smId] || p.smId,
+      region: p.region,
+    }));
+
+    // Sort: Aruba Central variants first, then alphabetical
+    apps.sort((a, b) => {
+      const aC = (a.name || '').toLowerCase().includes('central');
+      const bC = (b.name || '').toLowerCase().includes('central');
+      if (aC && !bC) return -1;
+      if (!aC && bC) return 1;
+      return (a.name || '').localeCompare(b.name || '');
+    });
+    return apps;
+  },
+
+  // GreenLake: fetch regions where a specific application is deployed.
+  // per-region structure: [{ id: "region-id", regionName: "...", serviceManagers: [{id, name}] }]
+  // Returns [{ id, name }] objects so the UI can show a proper label.
+  async glGetApplicationRegions({ applicationId, token }) {
+    const regionRes = await proxyCall({ url: `${GL_BASE}/service-catalog/v1/per-region-service-managers?limit=100`, token });
+    if (!regionRes.ok) return [];
+    const regionItems = (await regionRes.json()).items || [];
+
+    const regions = [];
+    for (const region of regionItems) {
+      const hasApp = (region.serviceManagers || []).some(sm => sm.id === applicationId);
+      if (hasApp) regions.push({ id: region.id, name: region.regionName || region.id });
+    }
+    return regions;
+  },
+
+  // GreenLake: PATCH — assign subscription (async)
+  // The v2beta1 PATCH endpoint requires the device id as a query parameter, not in the body.
+  // The body must use subscription.id (UUID), not subscription.key.
+  async glAssignSubscription({ deviceId, subscriptionId, token }) {
+    const res = await proxyCall({
+      url: `${GL_BASE}/devices/v2beta1/devices?id=${encodeURIComponent(deviceId)}`,
+      method: 'PATCH',
+      token,
+      body: { subscription: [{ id: subscriptionId }] },
+    });
+    if (res.status === 202) {
+      const loc = res.headers.get('location');
+      if (loc) await pollAsync(`${GL_BASE}${loc}`, token);
+      return { success: true };
+    }
+    if (!res.ok) throw new Error(`Assign subscription error ${res.status}: ${await res.text()}`);
+    return res.json();
+  },
+
+  // GreenLake: PATCH — assign application (async)
+  // Same pattern: id goes in query string, changes go in body.
+  async glAssignApplication({ deviceId, applicationId, region, token }) {
+    const res = await proxyCall({
+      url: `${GL_BASE}/devices/v2beta1/devices?id=${encodeURIComponent(deviceId)}`,
+      method: 'PATCH',
+      token,
+      body: { application: { id: applicationId }, region },
+    });
+    if (res.status === 202) {
+      const loc = res.headers.get('location');
+      if (loc) await pollAsync(`${GL_BASE}${loc}`, token);
+      return { success: true };
+    }
+    if (!res.ok) throw new Error(`Assign application error ${res.status}: ${await res.text()}`);
+    return res.json();
+  },
+
+  // Central: list sites.
+  // Standard clusters expose sites on the cluster URL.
+  // The HPE Internal cluster (internal.api.central.arubanetworks.com) uses the
+  // GreenLake NRM API instead — same GL bearer token, different base URL.
+  async centralGetSites({ centralToken, centralUrl, token }) {
+    const paths = [
+      '/configuration/v2/sites?limit=500',
+      '/monitoring/v2/sites?limit=500',
+      '/network-config/v1alpha1/sites',          // no params — limit= causes 400 on internal cluster
+      '/network-config/v1alpha1/sites?limit=100', // smaller limit in case 500 is out of range
+      '/configuration/v1/sites?limit=500',
+      '/platform/v1/sites?limit=500',
+    ];
+    console.log('[centralGetSites] cluster URL:', centralUrl);
+    for (const path of paths) {
+      const url = `https://${centralUrl}${path}`;
+      const res = await proxyCall({ url, token: centralToken });
+      console.log('[centralGetSites] tried', path, '→', res.status);
+      if (!res.ok) continue;
+      const d = await res.json();
+      const raw = d.sites || d.items || d.data || [];
+      // Normalize field names — older API uses site_id/site_name, newer uses id/scopeName
+      return raw.map(s => ({
+        id:      s.id      ?? s.site_id  ?? s.scopeId,
+        name:    s.name    || s.site_name || s.scopeName || String(s.id || s.site_id),
+        city:    s.city    || '',
+        state:   s.state   || '',
+        country: s.country || '',
+      }));
+    }
+
+    // Fallback: GreenLake NRM API (used by the Internal cluster and potentially
+    // other special clusters where Central doesn't expose the sites REST path).
+    // Sites here have type "network-config/sites" with scopeId / scopeName fields.
+    if (token) {
+      console.log('[centralGetSites] all Central paths failed — trying GreenLake NRM...');
+      const glRes = await proxyCall({ url: `${GL_BASE}/network-config/v1alpha1/sites`, token });
+      console.log('[centralGetSites] GreenLake NRM →', glRes.status);
+      if (glRes.ok) {
+        const d = await glRes.json();
+        const raw = d.items || d.sites || [];
+        return raw.map(s => ({
+          id:      String(s.id ?? s.scopeId ?? ''),
+          name:    s.name    || s.scopeName || String(s.id ?? ''),
+          city:    s.city    || '',
+          state:   s.state   || '',
+          country: s.country || '',
+          _source: 'greenlake-nrm',  // tag so assign can use the right API
+        }));
+      }
+    }
+
+    throw new Error(`Sites API not available on cluster: ${centralUrl}`);
+  },
+
+  // Central: assign a device to a site.
+  // Site assignment is attempted but ALWAYS soft-fails on error — it never blocks provisioning.
+  // The site dropdown in the UI is kept so users can record their intended assignment,
+  // but the API endpoint is not universally available across cluster types.
+  //
+  // Standard (public clusters): POST /configuration/v2/devices/move  or  /configuration/v1/devices/move
+  //   Body: { "serials": ["SERIAL"], "site_id": <int> }
+  // NRM / Internal cluster: POST /network-config/v1/site-add-devices
+  //   Body: { "devices": ["SERIAL"], "desScopeId": "SCOPE_ID_STRING" }
+  async centralAssignSite({ serial, siteId, centralToken, centralUrl }) {
+    if (!siteId) throw Object.assign(new Error('No site selected'), { softFail: true });
+
+    const softFail = msg => { throw Object.assign(new Error(msg), { softFail: true }); };
+
+    // Standard paths (public clusters)
+    const rawBody = `{"serials":${JSON.stringify([serial])},"site_id":${siteId}}`;
+    for (const path of ['/configuration/v2/devices/move', '/configuration/v1/devices/move']) {
+      const res = await proxyCall({
+        url: `https://${centralUrl}${path}`,
+        method: 'POST', token: centralToken,
+        body: rawBody, contentType: 'application/json',
+      });
+      console.log('[centralAssignSite] tried', path, '→', res.status);
+      if (res.status === 404) continue;
+      if (!res.ok) {
+        const txt = await res.text();
+        console.warn('[centralAssignSite] soft-fail on', path, res.status, txt);
+        softFail(`Site assignment not available on this cluster (${res.status}) — assign the site manually in Aruba Central`);
+      }
+      return res.json().catch(() => ({ success: true }));
+    }
+
+    // NRM paths (internal cluster / New Central) — desScopeId is a string scope ID
+    const nrmBody = { devices: [serial], desScopeId: String(siteId) };
+    for (const path of ['/network-config/v1/site-add-devices', '/network-config/v1alpha1/site-add-devices']) {
+      const res = await proxyCall({
+        url: `https://${centralUrl}${path}`,
+        method: 'POST', token: centralToken, body: nrmBody,
+      });
+      console.log('[centralAssignSite] NRM tried', path, '→', res.status);
+      if (res.status === 404) continue;
+      if (!res.ok) {
+        const txt = await res.text();
+        console.warn('[centralAssignSite] NRM soft-fail on', path, res.status, txt);
+        softFail(`Site assignment not available on this cluster (${res.status}) — assign the site manually in Aruba Central`);
+      }
+      return res.json().catch(() => ({ success: true }));
+    }
+
+    console.warn('[centralAssignSite] soft-fail — all paths exhausted on', centralUrl);
+    softFail('Site assignment not available on this cluster — assign the site manually in Aruba Central');
+  },
+
+  // Central: assign device function (persona).
+  // Endpoint: POST /network-config/v1alpha1/persona-assignment/{persona}
+  // Body formats vary by cluster version:
+  //   v2 body: { "device-id-list-v2": ["SERIAL_OR_UUID"] }      ← preferred
+  //   v1 body: { "device-id": ["SERIAL_OR_UUID"] }
+  //   list body: { "persona-device-list": ["SERIAL"] }           ← some clusters
+  //   old URL: POST /network-config/v1alpha1/persona-assignment
+  //            body: { "persona-device-list": [{ "device-function": persona, "device-id": ["SERIAL"] }] }
+  // If all attempts return 400 (e.g. "Feature flag disabled for this device type"), soft-fail.
+  async centralAssignFunction({ deviceId, serial, persona, centralToken, centralUrl }) {
+    const newUrl = `https://${centralUrl}/network-config/v1alpha1/persona-assignment/${persona}`;
+    const oldUrl = `https://${centralUrl}/network-config/v1alpha1/persona-assignment`;
+    const attempts = [
+      // Old URL (persona in body) — confirmed working on internal clusters
+      { label: 'old+serial', url: oldUrl, body: { 'persona-device-list': [{ 'device-function': persona, 'device-id': [serial] }] } },
+      { label: 'old+uuid',   url: oldUrl, body: { 'persona-device-list': [{ 'device-function': persona, 'device-id': [deviceId] }] } },
+      // New URL — try body formats in order of likelihood
+      { label: 'new+serial+v2',  url: newUrl, body: { 'device-id-list-v2': [serial] } },
+      { label: 'new+uuid+v2',    url: newUrl, body: { 'device-id-list-v2': [deviceId] } },
+      { label: 'new+serial+id',  url: newUrl, body: { 'device-id': [serial] } },
+      { label: 'new+uuid+id',    url: newUrl, body: { 'device-id': [deviceId] } },
+      { label: 'new+serial+plist', url: newUrl, body: { 'persona-device-list': [serial] } },
+      { label: 'new+uuid+plist',   url: newUrl, body: { 'persona-device-list': [deviceId] } },
+    ];
+    const errors = [];
+    for (const attempt of attempts) {
+      const res = await proxyCall({ url: attempt.url, method: 'POST', token: centralToken, body: attempt.body });
+      const errTxt = res.status !== 200 && res.status !== 204 ? await res.clone().text() : '';
+      console.log(`[centralAssignFunction] ${attempt.label} → ${res.status}`, errTxt ? errTxt.slice(0, 200) : 'OK');
+      if (res.status === 400) { errors.push(`[${attempt.label}] ${errTxt}`); continue; }
+      if (!res.ok) throw new Error(`Function assignment error ${res.status}: ${errTxt}`);
+      return res.json().catch(() => ({ success: true }));
+    }
+    // All 400s — feature may be disabled for this device type on this cluster.
+    // Treat as soft failure so the rest of provisioning still completes.
+    const featureDisabled = errors.some(e => e.toLowerCase().includes('feature flag'));
+    const softMsg = featureDisabled
+      ? 'Function/persona assignment is not enabled for this device type on your cluster — assign manually in Aruba Central'
+      : `Function assignment failed (all formats rejected — assign manually in Aruba Central):\n${errors.map(e => e.slice(0, 200)).join('\n')}`;
+    throw Object.assign(new Error(softMsg), { softFail: true });
+  },
+};
+
+// ── DEMO API ───────────────────────────────────────────────────────────────────
+const demoApi = {
+  async glAddDevice({ serial } = {}) {
+    await delay(1400);
+    const isSwitch   = (serial || '').startsWith('SG');
+    const isExisting = (serial || '').startsWith('EXIST');
+    if (isExisting) return {
+      id: 'f3a2c109-8b47-4e1d-a532-9d6e2b84f701', deviceType: 'IAP', model: 'AP-515', make: 'HPE',
+      serialNumber: serial || 'EXIST9M5904X',
+      foundExisting: true,
+      subscription: { key: 'EWCCWPTSMBVPMEFS', id: 'sub-ap-adv' },
+    };
+    return isSwitch
+      ? { id: 'ae72b841-3c1d-4f90-bb52-c9e1f23a8d05', deviceType: 'SWITCH', model: 'CX 6100 48G', make: 'HPE', serialNumber: serial || 'SG12K4B007' }
+      : { id: 'cddea735-9762-54ac-b24b-d6bda560b7f2', deviceType: 'IAP',    model: 'AP-515',      make: 'HPE', serialNumber: serial || 'VNT9M5904X' };
+  },
+  async glGetSubscriptions()  { await delay(900); return [
+    { id: 'sub-ap-adv',   key: 'EWCCWPTSMBVPMEFS', subscriptionType: 'CENTRAL_AP',          skuDescription: 'Aruba Central AP Adv 1y Sub 90D Eval Lic',    availableQuantity: 8  },
+    { id: 'sub-ap-fnd',   key: 'FNDAPX9KTZQCVWLM', subscriptionType: 'CENTRAL_AP',          skuDescription: 'Aruba Central AP Foundation 1Y Sub',           availableQuantity: 12 },
+    { id: 'sub-gw-adv',   key: 'AXHCCDXWFZVVT6FQ', subscriptionType: 'CENTRAL_GW',          skuDescription: 'Alpha License for Advance-70XX',               availableQuantity: 3  },
+    { id: 'sub-gw-fnd',   key: 'FNDGWP2LQMXCVZ8N', subscriptionType: 'CENTRAL_GW',          skuDescription: 'Aruba Central Foundation GW 70xx 1Y Sub',      availableQuantity: 4  },
+    { id: 'sub-sw-cx-f',  key: 'E5NW8ZXEKCJJ2YLV', subscriptionType: 'CENTRAL_SWITCH_CX',   skuDescription: 'Aruba Central Foundation Switch CX CL1 1Y',    availableQuantity: 6  },
+    { id: 'sub-sw-cx-a',  key: 'ADVCXSW3PKMNQRTZ', subscriptionType: 'CENTRAL_SWITCH_CX',   skuDescription: 'Aruba Central Advanced Switch CX CL1 1Y',      availableQuantity: 4  },
+    { id: 'sub-sw-aoss',  key: 'AOSSSWADV2LPTQNK', subscriptionType: 'CENTRAL_SWITCH_AOSS', skuDescription: 'Aruba Central Advanced AOS-S Switch 1Y',        availableQuantity: 2  },
+    { id: 'sub-bridge',   key: 'PA4TD2YUYEYECY',    subscriptionType: 'CENTRAL_BRIDGE',      skuDescription: 'HPE ANW Central 5G Bridge 1yr Sub E-STU',       availableQuantity: 1  },
+    { id: 'sub-uxi-cld',  key: 'E3C4A12F69D5C407FA',subscriptionType: 'UXI_SENSOR_CLOUD',   skuDescription: 'HPE ANW UXI Cloud Eval 90-day Sub E-STU',       availableQuantity: 49 },
+    { id: 'sub-uxi-lte',  key: 'E248CB7816AD94F4F9',subscriptionType: 'UXI_SENSOR_LTE',     skuDescription: 'HPE ANW UXI LTE Eval 90-day Sub E-STE',         availableQuantity: 50 },
+  ]; },
+  async glGetTags()           { await delay(400); return [
+    { key: 'Environment', value: 'Prod' }, { key: 'Department', value: 'Shipping' }, { key: 'Floor', value: '1' },
+  ]; },
+  async glGetLocations()      { await delay(500); return [
+    { id: 'loc1', name: 'HQ - Santa Clara' },
+    { id: 'loc2', name: 'Branch - Austin' },
+    { id: 'loc3', name: 'DC East - Ashburn' },
+  ]; },
+  async glCreateLocation({ name }) { await delay(600); return { id: 'loc_' + Date.now(), name }; },
+  async glGetUsers()           { await delay(500); return [
+    { id: 'usr-1', email: 'will.smith@hpe.com',         profile: { firstName: 'Will',    lastName: 'Smith'      } },
+    { id: 'usr-2', email: 'seth.fiermonti@hpe.com',    profile: { firstName: 'Seth',    lastName: 'Fiermonti'  } },
+    { id: 'usr-3', email: 'jonadams@hpe.com',          profile: { firstName: 'Jon',     lastName: 'Adams'      } },
+  ]; },
+  async glInviteUser({ firstName, lastName, email }) { await delay(600); return { id: 'usr_' + Date.now(), email, profile: { firstName, lastName } }; },
+  async glGetApplications()   { await delay(600); return [
+    { id: 'app-central-prod', name: 'HPE Aruba Networking Central', region: 'us-west', regionName: 'US West', standalonesupported: true },
+    { id: 'app-uxi',          name: 'HPE UXI',                      region: 'us-west', regionName: 'US West', standalonesupported: true },
+  ]; },
+  async glGetApplicationRegions() { await delay(400); return [
+    { id: 'us-west', name: 'US West' },
+    { id: 'eu-west', name: 'EU West' },
+  ]; },
+  async glAssignSubscription() { await delay(900); return { success: true }; },
+  async glAssignApplication()  { await delay(700); return { success: true }; },
+  async centralGetSites()      { await delay(750); return [
+    { id: '10001', name: 'Central Campus', city: 'San Diego', state: 'CA' },
+    { id: '10002', name: 'Branch Office',  city: 'Austin',    state: 'TX' },
+    { id: '10003', name: 'Data Center 1',  city: 'Phoenix',   state: 'AZ' },
+    { id: '10004', name: 'Remote Site',    city: 'Denver',    state: 'CO' },
+  ]; },
+  async centralAssignSite()    { await delay(800); return { success: true }; },
+  async centralAssignFunction(){ await delay(600); return { success: true }; },
+};
+
+// ── BARCODE PARSER ─────────────────────────────────────────────────────────────
+function normaliseMac(hex) {
+  return hex.replace(/[:\-]/g,'').replace(/(.{2})/g,'$1:').slice(0,-1).toUpperCase();
+}
+function parseBarcode(raw) {
+  raw = raw.trim();
+  // Combined: "SN:XXXXX;MAC:XX:XX:XX:XX:XX:XX"
+  let m = raw.match(/SN[:\s]+([A-Z0-9]+)[;\s,]+MAC[:\s]+([0-9A-Fa-f:]{17})/i);
+  if (m) return { serial: m[1].toUpperCase(), mac: m[2].toUpperCase() };
+  // Combined: "SERIAL/MACRAW12HEX"
+  m = raw.match(/^([A-Z0-9]{8,14})\/([0-9A-Fa-f]{12})$/i);
+  if (m) return { serial: m[1].toUpperCase(), mac: normaliseMac(m[2]) };
+  // Combined: "serial=xxx mac=xxx"
+  const serialM = raw.match(/serial[=:\s]+([A-Z0-9]{8,14})/i);
+  if (serialM) {
+    const macM = raw.match(/mac[=:\s]+([0-9A-Fa-f:]{17})/i);
+    return { serial: serialM[1].toUpperCase(), mac: macM ? macM[1].toUpperCase() : null };
+  }
+  // MAC-only: bare 12 hex chars e.g. "000B86B86418"
+  m = raw.match(/^([0-9A-Fa-f]{12})$/i);
+  if (m) return { serial: null, mac: normaliseMac(m[1]) };
+  // MAC-only: colon/dash separated e.g. "00:0B:86:B8:64:18"
+  m = raw.match(/^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$/i);
+  if (m) return { serial: null, mac: raw.replace(/-/g,':').toUpperCase() };
+  // MAC-only: prefixed "MAC:000B86B86418"
+  m = raw.match(/^MAC[:\s]+([0-9A-Fa-f]{12,17})$/i);
+  if (m) return { serial: null, mac: normaliseMac(m[1].replace(/[:\-]/g,'')) };
+  // Serial-only
+  m = raw.match(/^([A-Z0-9]{8,14})$/i);
+  if (m) return { serial: m[1].toUpperCase(), mac: null };
+  return { serial: raw, mac: null };
+}
+
+// ── SHARED COMPONENTS ──────────────────────────────────────────────────────────
+const Card = ({ children, className = '' }) => (
+  <div className={`bg-white bg-opacity-5 border border-white border-opacity-10 rounded-2xl p-5 ${className}`}>{children}</div>
+);
+
+const Btn = ({ onClick, children, variant = 'primary', disabled = false, className = '' }) => {
+  const styles = {
+    primary:   'bg-emerald-500 text-white active:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed',
+    secondary: 'bg-white bg-opacity-10 text-white border border-white border-opacity-15 active:bg-opacity-20',
+    ghost:     'text-gray-400 active:text-white',
+    danger:    'bg-red-500 bg-opacity-20 text-red-400 border border-red-500 border-opacity-30',
+  };
+  return (
+    <button onClick={onClick} disabled={disabled}
+      className={`w-full py-4 rounded-2xl font-semibold text-[15px] transition-all duration-100 active:scale-[0.98] ${styles[variant]} ${className}`}>
+      {children}
+    </button>
+  );
+};
+
+const Field = ({ label, value, mono = false }) => (
+  <div className="flex items-start justify-between py-3 gap-4">
+    <span className="text-gray-400 text-sm shrink-0">{label}</span>
+    <span className={`text-white text-sm text-right ${mono ? 'font-mono' : 'font-medium'} truncate max-w-[200px]`}>{value || '—'}</span>
+  </div>
+);
+
+const Spinner = ({ size = 36 }) => (
+  <div className="flex justify-center py-6">
+    <div className="spinner" style={{ width: size, height: size }} />
+  </div>
+);
+
+const Badge = ({ status }) => {
+  const map = {
+    success: 'bg-emerald-500 bg-opacity-20 text-emerald-400',
+    loading: 'bg-yellow-500 bg-opacity-20 text-yellow-300',
+    error:   'bg-red-500 bg-opacity-20 text-red-400',
+    skipped: 'bg-blue-500 bg-opacity-20 text-blue-400',
+    pending: 'bg-white bg-opacity-10 text-gray-500',
+  };
+  const label = { success: '✓', loading: '…', error: '✕', skipped: '↷', pending: '·' };
+  return <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${map[status]}`}>{label[status]}</span>;
+};
+
+const Toggle = ({ value, onChange, label, sublabel }) => (
+  <div className="flex items-center justify-between p-4 bg-white bg-opacity-5 rounded-2xl border border-white border-opacity-10">
+    <div>
+      <p className="text-white font-medium text-sm">{label}</p>
+      {sublabel && <p className="text-gray-500 text-xs mt-0.5">{sublabel}</p>}
+    </div>
+    <button onClick={() => onChange(!value)}
+      className={`w-12 h-6 rounded-full transition-colors duration-200 relative shrink-0 ${value ? 'bg-emerald-500' : 'bg-gray-700'}`}>
+      <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform duration-200 ${value ? 'translate-x-6' : ''}`} />
+    </button>
+  </div>
+);
+
+const TextInput = ({ label, value, onChange, type = 'text', placeholder = '', sublabel = '' }) => (
+  <div className="space-y-1.5">
+    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{label}</label>
+    {sublabel && <p className="text-gray-600 text-xs">{sublabel}</p>}
+    <input type={type} value={value} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+      className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm transition-colors" />
+  </div>
+);
+
+const SelectInput = ({ label, value, onChange, options, sublabel = '' }) => (
+  <div className="space-y-1.5">
+    <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">{label}</label>
+    {sublabel && <p className="text-gray-600 text-xs">{sublabel}</p>}
+    <select value={value} onChange={e => onChange(e.target.value)}
+      className="w-full bg-gray-800 border border-white border-opacity-10 rounded-xl px-4 py-3.5 text-white focus:outline-none focus:border-emerald-500 text-sm appearance-none">
+      {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+    </select>
+  </div>
+);
+
+const ProgressSteps = ({ step, total }) => (
+  <div className="flex gap-1.5 px-5 pb-3">
+    {Array.from({ length: total }).map((_, i) => (
+      <div key={i} className={`h-[3px] flex-1 rounded-full transition-all duration-300 ${
+        i < step ? 'bg-emerald-500' : i === step ? 'bg-emerald-500 opacity-40' : 'bg-white opacity-10'
+      }`} />
+    ))}
+  </div>
+);
+
+const ErrorBanner = ({ msg, onRetry }) => (
+  <div className="bg-red-500 bg-opacity-10 border border-red-500 border-opacity-30 rounded-2xl p-4 space-y-3">
+    <p className="text-red-400 text-sm">{msg}</p>
+    {onRetry && <button onClick={onRetry} className="text-red-400 text-xs underline">Try again</button>}
+  </div>
+);
+
+// Persistent device identity chip — shown in the header after GL add completes.
+// Reminds the user what device they're provisioning as they move through screens.
+// Parse port count from Aruba switch model strings.
+// Part number → port count for common Aruba CX fixed-port switches.
+const DeviceChip = ({ deviceType, model, partNumber, serial }) => {
+  const meta = DEVICE_TYPE_META[deviceType] || { label: deviceType || 'Device', icon: '📦' };
+  const shortSerial = serial ? serial.slice(-6).toUpperCase() : '';
+  return (
+    <div className="mx-5 mb-3 px-3 py-2 rounded-xl flex items-center gap-2.5"
+      style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)' }}>
+      <span className="text-base leading-none">{meta.icon}</span>
+      <div className="flex items-center gap-1.5 min-w-0 flex-1">
+        <span className="text-gray-400 text-xs shrink-0">{meta.label}</span>
+        {model && <span className="text-gray-600 text-xs">·</span>}
+        {model && <span className="text-white text-xs font-semibold truncate">{model}</span>}
+        {partNumber && <span className="text-gray-600 text-xs">·</span>}
+        {partNumber && <span className="text-gray-500 text-xs font-mono shrink-0">{partNumber}</span>}
+        {shortSerial && <span className="text-gray-600 text-xs">·</span>}
+        {shortSerial && <span className="text-gray-600 text-xs font-mono shrink-0">···{shortSerial}</span>}
+      </div>
+    </div>
+  );
+};
+
+// ── BARCODE SCANNER ────────────────────────────────────────────────────────────
+// continuous=true: 2 s cooldown between scans so multiple barcodes can be read
+// continuous=false (default): fires once and stops (legacy behaviour)
+const BarcodeScanner = ({ onScan, onCameraError, continuous = false }) => {
+  const cooldownRef  = useRef(false);
+  const lastValueRef = useRef(null);
+  const confirmCount = useRef(0);
+  const CONFIRM_NEEDED = 3; // same value must decode this many times before accepting
+
+  useEffect(() => {
+    const scanner = new Html5Qrcode('qr-reader-div');
+    scanner.start(
+      { facingMode: 'environment' },
+      { fps: 20, qrbox: { width: 280, height: 130 }, aspectRatio: 1.6 },
+      (text) => {
+        if (cooldownRef.current) return;
+        // Multi-scan confirmation: require CONFIRM_NEEDED consecutive identical reads
+        if (text === lastValueRef.current) {
+          confirmCount.current += 1;
+        } else {
+          lastValueRef.current = text;
+          confirmCount.current = 1;
+        }
+        if (confirmCount.current < CONFIRM_NEEDED) return;
+        // Confirmed — reset and fire
+        lastValueRef.current = null;
+        confirmCount.current = 0;
+        cooldownRef.current = true;
+        onScan(text);
+        if (continuous) {
+          setTimeout(() => { cooldownRef.current = false; }, 2000);
+        }
+      },
+      () => {}
+    ).catch(() => onCameraError('Camera access denied. Use manual entry below.'));
+    return () => { scanner.isScanning && scanner.stop().catch(() => {}); };
+  }, []);
+
+  return (
+    <div className="relative bg-black rounded-2xl overflow-hidden">
+      <div id="qr-reader-div" />
+      <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+        <div className="relative" style={{ width: 260, height: 120 }}>
+          {[['top-0 left-0','border-t-2 border-l-2 rounded-tl-lg'],['top-0 right-0','border-t-2 border-r-2 rounded-tr-lg'],
+            ['bottom-0 left-0','border-b-2 border-l-2 rounded-bl-lg'],['bottom-0 right-0','border-b-2 border-r-2 rounded-br-lg']
+          ].map(([pos, cls]) => <div key={pos} className={`absolute ${pos} w-6 h-6 border-emerald-400 ${cls}`} />)}
+          <div className="absolute inset-x-0 top-1/2 h-px bg-emerald-400 opacity-60 animate-pulse" />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ── SCREEN: SETTINGS ──────────────────────────────────────────────────────────
+const SettingsScreen = ({ settings, onSave, onBack }) => {
+  const [s, setS] = useState({ ...settings });
+  const set = k => v => setS(p => ({ ...p, [k]: v }));
+  const clusterOptions = CLUSTERS.map(c => ({ value: c.id, label: `${c.label} (${c.url})` }));
+
+  return (
+    <div className="p-5 space-y-5 step-enter">
+      <div className="flex items-center gap-3 pt-2">
+        <div>
+          <h2 className="text-white font-bold text-xl">API Settings</h2>
+          <p className="text-gray-400 text-sm">Configure HPE credentials</p>
+        </div>
+      </div>
+
+      <AboutPanel />
+
+      <Toggle value={s.demoMode} onChange={set('demoMode')}
+        label="Demo Mode" sublabel="Simulate all API calls — no real requests made" />
+      <Toggle value={s.scanConfirm ?? true} onChange={set('scanConfirm')}
+        label="Scan Confirmation" sublabel="Preview each barcode scan before accepting — tap Rescan if it looks wrong" />
+
+      {!s.demoMode && (
+        <>
+          <div className="flex items-start gap-2 px-1">
+            <span className="text-xs">🔒</span>
+            <p className="text-gray-500 text-xs">Credentials are saved in your browser only — never stored on any server.</p>
+          </div>
+
+          <Card className="space-y-4">
+            <p className="text-emerald-400 text-xs font-bold uppercase tracking-widest">HPE GreenLake</p>
+            <p className="text-gray-500 text-xs">Generate in GreenLake → API Gateway → Client Credentials.</p>
+            <TextInput label="Client ID" value={s.glClientId} onChange={set('glClientId')} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" />
+            <TextInput label="Client Secret" value={s.glClientSecret} onChange={set('glClientSecret')} type="password" placeholder="••••••••••••••••" />
+            <TextInput label="Workspace ID" value={s.workspaceId} onChange={set('workspaceId')} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+              sublabel="Found in GreenLake → Manage → Workspace Details. Used for unified GreenLake + Aruba Central auth." />
+          </Card>
+
+          <Card className="space-y-4">
+            <p className="text-emerald-400 text-xs font-bold uppercase tracking-widest">Aruba Central Cluster</p>
+            <SelectInput label="Cluster" value={s.centralCluster} onChange={set('centralCluster')}
+              options={clusterOptions}
+              sublabel="Select the cluster your Central account is on" />
+          </Card>
+        </>
+      )}
+
+      <Btn onClick={() => onSave(s)} disabled={!s.demoMode && (
+        !s.glClientId?.trim() || !s.glClientSecret?.trim() || !s.workspaceId?.trim()
+      )}>
+        Save & Continue
+      </Btn>
+    </div>
+  );
+};
+
+// ── SCREEN: SCAN ──────────────────────────────────────────────────────────────
+const SCAN_CONFIRM_MS = 4000;
+
+const AboutPanel = () => {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="rounded-xl overflow-hidden"
+      style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-3 text-left">
+        <span className="text-gray-400 text-xs font-semibold uppercase tracking-wider">ℹ️ About this app</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          className={`text-gray-500 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}>
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+      {open && (
+        <div className="px-4 pb-4 space-y-3 text-xs text-gray-400 border-t border-white border-opacity-5 pt-3">
+          <p>This app guides you through onboarding an HPE Aruba device into GreenLake and provisioning it in Aruba Central.</p>
+          <p className="text-gray-500">🔒 Your credentials are stored in your browser's local storage only. API calls are routed through a lightweight Cloudflare proxy for browser compatibility — nothing is logged or stored server-side.</p>
+          <div>
+            <p className="text-gray-300 font-semibold mb-1">What you'll need</p>
+            <p className="text-gray-500 mb-1">Enter these in Settings ⚙️ before your first scan</p>
+            <ul className="space-y-0.5 pl-1">
+              <li>· GreenLake Client ID and Client Secret</li>
+              <li>· GreenLake Workspace ID</li>
+            </ul>
+          </div>
+          <div>
+            <p className="text-gray-300 font-semibold mb-1">How it works</p>
+            <ul className="space-y-0.5 pl-1">
+              <li>1. Scan the device S/N and MAC barcodes</li>
+              <li>2. Follow the guided steps to assign a subscription + Function</li>
+              <li>3. Review and confirm — the app handles the rest</li>
+            </ul>
+          </div>
+          <p className="text-gray-600 pt-1 border-t border-white border-opacity-5">
+            ⚠️ This tool makes live changes to your GreenLake and Aruba Central environment. Always verify on the Review screen before confirming.
+          </p>
+          <p className="text-gray-600">
+            This is an independent tool — not affiliated with, endorsed by, or supported by HPE.
+          </p>
+          <p className="text-gray-600">
+            Built by <a href="https://github.com/wifiguywill" target="_blank" rel="noopener noreferrer" className="text-gray-400 hover:text-white underline transition-colors">@WifiGuyWill</a>
+          </p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const WelcomeScreen = ({ onDismiss }) => (
+  <div className="p-5 flex flex-col step-enter" style={{ paddingTop: '4rem', paddingBottom: '2rem' }}>
+    <div className="space-y-6">
+      <div className="space-y-1">
+        <h2 className="text-white font-bold text-2xl">Welcome</h2>
+        <p className="text-gray-400 text-sm">HPE Aruba Device Onboarder</p>
+      </div>
+
+      <p className="text-gray-300 text-sm leading-relaxed">
+        This app guides you through onboarding an HPE Aruba device into GreenLake and provisioning it in Aruba Central.
+      </p>
+
+      <div className="space-y-4 text-sm">
+        <div>
+          <p className="text-white font-semibold mb-1">What you'll need</p>
+          <p className="text-gray-600 text-xs">You'll enter these on the next screen</p>
+          <p className="text-gray-600 text-xs mb-2">🔒 Your credentials stay in your browser only — never stored on any server.</p>
+          <ul className="space-y-1.5 text-gray-400">
+            <li className="flex items-start gap-2"><span className="text-emerald-500 mt-0.5">·</span>GreenLake Client ID and Client Secret</li>
+            <li className="flex items-start gap-2"><span className="text-emerald-500 mt-0.5">·</span>GreenLake Workspace ID</li>
+          </ul>
+        </div>
+
+        <div>
+          <p className="text-white font-semibold mb-2">How it works</p>
+          <ul className="space-y-1.5 text-gray-400">
+            <li className="flex items-start gap-2"><span className="text-emerald-500 shrink-0">1.</span>Scan the device S/N and MAC barcodes</li>
+            <li className="flex items-start gap-2"><span className="text-emerald-500 shrink-0">2.</span>Follow the guided steps to assign a subscription + Function</li>
+            <li className="flex items-start gap-2"><span className="text-emerald-500 shrink-0">3.</span>Review and confirm — the app handles the rest</li>
+          </ul>
+        </div>
+      </div>
+
+      <div className="space-y-2 pt-2 border-t border-white border-opacity-5">
+        <p className="text-gray-600 text-xs leading-relaxed">
+          ⚠️ This tool makes live changes to your GreenLake and Aruba Central environment. Always verify on the Review screen before confirming.
+        </p>
+        <p className="text-gray-600 text-xs">
+          This is an independent tool — not affiliated with, endorsed by, or supported by HPE.
+        </p>
+        <p className="text-gray-600 text-xs">
+          Built by <a href="https://github.com/wifiguywill" target="_blank" rel="noopener noreferrer" className="text-gray-500 hover:text-white underline transition-colors">@WifiGuyWill</a>
+        </p>
+      </div>
+    </div>
+
+    <button onClick={onDismiss}
+      className="mt-8 w-full py-4 rounded-2xl text-white font-bold text-base"
+      style={{ background: 'linear-gradient(135deg, #059669, #047857)' }}>
+      Get Started →
+    </button>
+  </div>
+);
+
+const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
+  const [fields, setFields] = useState({ serial: '', mac: '' });
+  const [lastScan, setLastScan] = useState(null);
+  const [scanCount, setScanCount] = useState(0);
+  const [cameraErr, setCameraErr] = useState('');
+  const [pendingScan, setPendingScan] = useState(null); // raw string waiting for confirmation
+  const confirmTimer = useRef(null);
+
+  const processScan = useCallback(raw => {
+    const result = parseBarcode(raw);
+    if (!result.serial && !result.mac) return;
+    setFields(prev => {
+      const next = { ...prev };
+      if (result.serial) next.serial = result.serial;
+      if (result.mac)    next.mac    = result.mac;
+      return next;
+    });
+    setScanCount(n => n + 1);
+    if (result.serial && result.mac) setLastScan({ label: 'Serial + MAC captured' });
+    else if (result.serial)          setLastScan({ label: `Serial captured: ${result.serial}` });
+    else                             setLastScan({ label: `MAC captured: ${result.mac}` });
+  }, []);
+
+  const confirmScan = useCallback(raw => {
+    clearTimeout(confirmTimer.current);
+    setPendingScan(null);
+    processScan(raw);
+  }, [processScan]);
+
+  const dismissScan = useCallback(() => {
+    clearTimeout(confirmTimer.current);
+    setPendingScan(null);
+  }, []);
+
+  const handleScan = useCallback(raw => {
+    const result = parseBarcode(raw);
+    if (!result.serial && !result.mac) return;
+    if (settings.scanConfirm ?? true) {
+      clearTimeout(confirmTimer.current);
+      setPendingScan(raw);
+      confirmTimer.current = setTimeout(() => {
+        setPendingScan(null);
+        processScan(raw);
+      }, SCAN_CONFIRM_MS);
+    } else {
+      processScan(raw);
+    }
+  }, [settings.scanConfirm, processScan]);
+
+  const canContinue = fields.serial.trim().length > 0 && fields.mac.trim().length > 0;
+
+  // Hint text tells the user what's still missing
+  const hint = !fields.serial && !fields.mac ? 'Scan one barcode at a time — S/N or MAC, either order'
+             : !fields.serial                 ? 'MAC captured — now scan the Serial Number barcode'
+             : !fields.mac                    ? 'Serial captured — now scan the MAC barcode'
+             :                                  'Both captured — verify below and tap Continue';
+
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="flex items-center justify-between pt-2">
+        <div>
+          <h2 className="text-white font-bold text-xl">Scan Device</h2>
+          <p className="text-gray-400 text-sm">Scan S/N and MAC barcodes — one at a time</p>
+        </div>
+        <button onClick={onOpenSettings} className="w-9 h-9 bg-white bg-opacity-10 rounded-xl flex items-center justify-center text-base">⚙️</button>
+      </div>
+
+      {settings.demoMode && (
+        <div className="flex items-center gap-2 bg-yellow-500 bg-opacity-10 border border-yellow-500 border-opacity-25 rounded-xl px-3 py-2.5">
+          <span className="text-yellow-400 text-xs font-semibold">🧪 Demo Mode — no real API calls</span>
+        </div>
+      )}
+
+      {/* Camera + confirmation overlay */}
+      {!cameraErr ? (
+        <div className="relative">
+          <BarcodeScanner onScan={handleScan} onCameraError={setCameraErr} continuous />
+          {pendingScan && (() => {
+            const parsed = parseBarcode(pendingScan);
+            return (
+              <div className="absolute inset-x-0 bottom-0 rounded-b-2xl overflow-hidden"
+                style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.95) 60%, rgba(0,0,0,0.7) 100%)' }}>
+                {/* Auto-confirm progress bar */}
+                <div className="h-0.5 bg-emerald-500 opacity-60"
+                  style={{ animation: `shrinkWidth ${SCAN_CONFIRM_MS}ms linear forwards` }} />
+                <div className="px-4 pt-3 pb-4 space-y-2.5">
+                  <p className="text-gray-400 text-xs text-center uppercase tracking-widest font-semibold">Scanned</p>
+                  {parsed.serial && <p className="text-white text-sm font-mono text-center">S/N: <span className="text-emerald-400 font-bold">{parsed.serial}</span></p>}
+                  {parsed.mac    && <p className="text-white text-sm font-mono text-center">MAC: <span className="text-emerald-400 font-bold">{parsed.mac}</span></p>}
+                  {!parsed.serial && !parsed.mac && <p className="text-gray-300 text-xs font-mono text-center truncate">{pendingScan}</p>}
+                  <div className="flex gap-2 pt-1">
+                    <button onClick={dismissScan}
+                      className="flex-1 py-2 rounded-xl text-sm font-semibold text-gray-300 border border-white border-opacity-20 bg-white bg-opacity-10">
+                      ✕ Rescan
+                    </button>
+                    <button onClick={() => confirmScan(pendingScan)}
+                      className="flex-1 py-2 rounded-xl text-sm font-semibold text-white bg-emerald-600">
+                      ✓ Use this
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      ) : <ErrorBanner msg={cameraErr} />}
+
+      {settings.demoMode && (
+        <div className="grid grid-cols-1 gap-2">
+          <Btn variant="secondary" onClick={() => handleScan('SN:EXIST9M5904X;MAC:AA:BB:CC:DD:EE:FF')}>
+            🔄 Simulate Existing Device
+          </Btn>
+        </div>
+      )}
+
+      {/* Dynamic hint / last-scan feedback */}
+      <div className={`flex items-center gap-2 rounded-xl px-3 py-2 text-xs transition-all ${
+        lastScan
+          ? 'bg-emerald-500 bg-opacity-10 border border-emerald-500 border-opacity-30 text-emerald-300'
+          : 'bg-white bg-opacity-5 text-gray-500'
+      }`}>
+        <span>{lastScan ? '✓' : '↑'}</span>
+        <span>{lastScan ? lastScan.label : hint}</span>
+      </div>
+
+      {/* Editable fields — populated by scanner, editable manually */}
+      <Card className="space-y-4">
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold uppercase tracking-wider flex items-center gap-2"
+            style={{ color: fields.serial ? '#10b981' : '#6b7280' }}>
+            Serial Number {fields.serial && <span className="text-emerald-500 text-base leading-none">✓</span>}
+          </label>
+          <input value={fields.serial}
+            onChange={e => setFields(p => ({ ...p, serial: e.target.value.toUpperCase() }))}
+            placeholder="e.g. CP0001108"
+            className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm font-mono transition-colors" />
+        </div>
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold uppercase tracking-wider flex items-center gap-2"
+            style={{ color: fields.mac ? '#10b981' : '#6b7280' }}>
+            MAC Address {fields.mac && <span className="text-emerald-500 text-base leading-none">✓</span>}
+          </label>
+          <input value={fields.mac}
+            onChange={e => setFields(p => ({ ...p, mac: e.target.value.toUpperCase() }))}
+            placeholder="e.g. 00:0B:86:B8:64:18"
+            className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm font-mono transition-colors" />
+        </div>
+      </Card>
+
+      <Btn
+        onClick={() => onScanned({ serial: fields.serial.trim(), mac: fields.mac.trim() || null }, null)}
+        disabled={!canContinue}>
+        Continue →
+      </Btn>
+    </div>
+  );
+};
+
+// ── SCREEN: DEVICE TYPE ───────────────────────────────────────────────────────
+const DeviceTypeScreen = ({ device, onSelect }) => {
+  const [selected, setSelected] = useState(null);
+  const types = [
+    { id: 'AP',      icon: '📡', label: 'Access Point',  desc: 'Campus AP or Microbranch AP' },
+    { id: 'GATEWAY', icon: '🌐', label: 'Gateway',        desc: 'Branch, Mobility GW, or VPN Concentrator' },
+    { id: 'SWITCH',  icon: '🔀', label: 'Switch',         desc: 'AOS-CX or AOS-S switches' },
+    { id: 'BRIDGE',  icon: '🌉', label: 'Bridge',         desc: 'Bridge mode device' },
+    { id: 'EP',      icon: '💡', label: 'Edge Platform',  desc: 'IoT gateway or Hybrid NAC' },
+    { id: 'UXI',     icon: '📊', label: 'UXI Sensor',    desc: 'Network experience monitoring probe' },
+  ];
+  return (
+    <div className="p-5 space-y-5 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Device Type</h2>
+        <p className="text-gray-400 text-sm">What kind of device is <span className="font-mono text-white">{device.serial}</span>?</p>
+      </div>
+      <div className="space-y-2.5">
+        {types.map(t => (
+          <button key={t.id} onClick={() => setSelected(t.id)}
+            className={`w-full text-left p-4 rounded-2xl border transition-all ${
+              selected === t.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+              : 'bg-white bg-opacity-5 border-white border-opacity-10 active:bg-opacity-10'
+            }`}>
+            <div className="flex items-center gap-4">
+              <span className="text-3xl">{t.icon}</span>
+              <div className="flex-1">
+                <p className="text-white font-semibold text-sm">{t.label}</p>
+                <p className="text-gray-500 text-xs mt-0.5">{t.desc}</p>
+              </div>
+              {selected === t.id && <span className="text-emerald-400 text-lg">✓</span>}
+            </div>
+          </button>
+        ))}
+      </div>
+      <Btn onClick={() => onSelect(selected)} disabled={!selected}>Continue →</Btn>
+    </div>
+  );
+};
+
+// ── SCREEN: TAGS (optional) ───────────────────────────────────────────────────
+const TagsScreen = ({ settings, api, onNext }) => {
+  const [existingTags, setExistingTags] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState({});  // key -> value
+  const [customKey, setCustomKey] = useState('');
+  const [customVal, setCustomVal] = useState('');
+
+  useEffect(() => {
+    api.glGetTags(settings)
+      .then(tags => { setExistingTags(tags); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const toggleTag = (key, value) => {
+    setSelected(p => {
+      const n = { ...p };
+      if (n[key] === value) delete n[key]; else n[key] = value;
+      return n;
+    });
+  };
+
+  const addCustom = () => {
+    if (!customKey.trim()) return;
+    setSelected(p => ({ ...p, [customKey.trim()]: customVal.trim() }));
+    setCustomKey(''); setCustomVal('');
+  };
+
+  const selectedCount = Object.keys(selected).length;
+
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Tags <span className="text-gray-500 font-normal text-base">— optional</span></h2>
+        <p className="text-gray-400 text-sm">Label this device for filtering and reporting</p>
+      </div>
+
+      {loading ? <Spinner /> : (
+        <>
+          {existingTags.length > 0 && (
+            <div>
+              <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-2">Existing workspace tags</p>
+              <div className="flex flex-wrap gap-2">
+                {existingTags.map(tag => {
+                  const key = tag.key || tag.name;
+                  const val = tag.value || '';
+                  const isOn = selected[key] === val;
+                  return (
+                    <button key={key + val} onClick={() => toggleTag(key, val)}
+                      className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-all ${
+                        isOn ? 'bg-emerald-500 bg-opacity-20 border-emerald-500 border-opacity-40 text-emerald-300'
+                              : 'bg-white bg-opacity-5 border-white border-opacity-10 text-gray-400'
+                      }`}>
+                      {key}{val ? `: ${val}` : ''}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <Card className="space-y-3">
+            <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider">Custom tag</p>
+            <input value={customKey} onChange={e => setCustomKey(e.target.value)} placeholder="Key"
+              className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-3 py-2.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm" />
+            <div className="flex gap-2">
+              <input value={customVal} onChange={e => setCustomVal(e.target.value)} placeholder="Value (optional)"
+                className="flex-1 min-w-0 bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-3 py-2.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm" />
+              <button onClick={addCustom} disabled={!customKey.trim()}
+                className="px-4 py-2.5 bg-emerald-500 bg-opacity-20 text-emerald-400 rounded-xl text-sm font-semibold disabled:opacity-30 shrink-0">+</button>
+            </div>
+          </Card>
+
+          {selectedCount > 0 && (
+            <Card>
+              <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider mb-2">Selected ({selectedCount})</p>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(selected).map(([k, v]) => (
+                  <span key={k} onClick={() => setSelected(p => { const n={...p}; delete n[k]; return n; })}
+                    className="px-3 py-1 bg-emerald-500 bg-opacity-15 border border-emerald-500 border-opacity-30 text-emerald-300 rounded-full text-xs cursor-pointer">
+                    {k}{v ? `: ${v}` : ''} ×
+                  </span>
+                ))}
+              </div>
+            </Card>
+          )}
+        </>
+      )}
+
+      <div className="space-y-2.5 pt-1">
+        <Btn onClick={() => onNext(selected)} disabled={selectedCount === 0 || loading}>
+          {`Add ${selectedCount} Tag${selectedCount !== 1 ? 's' : ''} →`}
+        </Btn>
+        <Btn variant="secondary" onClick={() => onNext({})}>Skip for Now</Btn>
+      </div>
+    </div>
+  );
+};
+
+// ── SCREEN: LOCATION (optional) ───────────────────────────────────────────────
+const LocationScreen = ({ settings, api, onNext }) => {
+  const [locations, setLocations] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [mode, setMode] = useState('list');  // 'list' | 'create'
+  const [search, setSearch] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createErr, setCreateErr] = useState('');
+  const [newLoc, setNewLoc] = useState({ name: '', street: '', city: '', state: '', zip: '', country: '' });
+  const setNL = k => v => setNewLoc(p => ({ ...p, [k]: v }));
+
+  useEffect(() => {
+    api.glGetLocations(settings)
+      .then(locs => { setLocations(locs); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const filtered = locations.filter(l => (l.name || '').toLowerCase().includes(search.toLowerCase()));
+
+  const handleCreate = async () => {
+    if (!newLoc.name.trim()) return;
+    setCreating(true); setCreateErr('');
+    try {
+      const loc = await api.glCreateLocation({ name: newLoc.name, address: newLoc, ...settings });
+      setLocations(p => [loc, ...p]);
+      setSelected(loc);
+      setMode('list');
+    } catch (e) { setCreateErr(e.message); }
+    setCreating(false);
+  };
+
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Location <span className="text-gray-500 font-normal text-base">— optional</span></h2>
+        <p className="text-gray-400 text-sm">Associate a GreenLake location with this device</p>
+      </div>
+
+      <div className="flex bg-white bg-opacity-5 rounded-xl p-1 gap-1">
+        {[['list','📋  Pick Existing'],['create','➕  Create New']].map(([m, lbl]) => (
+          <button key={m} onClick={() => setMode(m)}
+            className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${mode === m ? 'bg-emerald-500 text-white' : 'text-gray-400'}`}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+
+      {mode === 'list' ? (
+        <>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search locations…"
+            className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
+          {loading ? <Spinner /> : (
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {filtered.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No locations found</p>}
+              {filtered.map(loc => (
+                <button key={loc.id} onClick={() => setSelected(s => s?.id === loc.id ? null : loc)}
+                  className={`w-full text-left p-4 rounded-2xl border transition-all ${
+                    selected?.id === loc.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+                    : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
+                  <p className="text-white font-medium text-sm">{loc.name}</p>
+                  {loc.city && <p className="text-gray-500 text-xs mt-0.5">{[loc.city, loc.country].filter(Boolean).join(', ')}</p>}
+                  {selected?.id === loc.id && <p className="text-emerald-400 text-xs mt-1">✓ Selected</p>}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <Card className="space-y-3">
+          <TextInput label="Location Name" value={newLoc.name} onChange={setNL('name')} placeholder="e.g. London Office – Floor 3" />
+          <TextInput label="Street Address" value={newLoc.street} onChange={setNL('street')} placeholder="123 Main St" />
+          <div className="grid grid-cols-2 gap-3">
+            <TextInput label="City" value={newLoc.city} onChange={setNL('city')} placeholder="London" />
+            <TextInput label="State / Region" value={newLoc.state} onChange={setNL('state')} placeholder="ENG" />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <TextInput label="Postal Code" value={newLoc.zip} onChange={setNL('zip')} placeholder="EC1A 1BB" />
+            <TextInput label="Country" value={newLoc.country} onChange={setNL('country')} placeholder="GB" />
+          </div>
+          {createErr && <p className="text-red-400 text-xs">{createErr}</p>}
+          <Btn onClick={handleCreate} disabled={!newLoc.name.trim() || creating}>
+            {creating ? 'Creating…' : 'Create Location'}
+          </Btn>
+        </Card>
+      )}
+
+      <div className="space-y-2.5 pt-1">
+        <Btn onClick={() => onNext(selected)} disabled={!selected}>
+          {selected ? `Use "${selected.name}" →` : 'Select a Location →'}
+        </Btn>
+        <Btn variant="secondary" onClick={() => onNext(null)}>Skip for Now</Btn>
+      </div>
+    </div>
+  );
+};
+
+// ── SCREEN: SERVICE CONTACT (optional) ───────────────────────────────────────
+const userName = u => {
+  const fn = u.profile?.firstName || u.firstName || '';
+  const ln = u.profile?.lastName  || u.lastName  || '';
+  return (fn + ' ' + ln).trim() || u.displayName || u.email || u.username || u.id;
+};
+const userEmail = u => u.email || u.username || u.profile?.email || '';
+
+const ContactScreen = ({ settings, api, onSelect, onSkip }) => {
+  const [users, setUsers]       = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [mode, setMode]         = useState('list');
+  const [search, setSearch]     = useState('');
+  const [creating, setCreating] = useState(false);
+  const [createErr, setCreateErr] = useState('');
+  const [newUser, setNewUser]   = useState({ firstName: '', lastName: '', email: '' });
+  const setNU = k => v => setNewUser(p => ({ ...p, [k]: v }));
+
+  useEffect(() => {
+    api.glGetUsers(settings)
+      .then(u => { setUsers(u); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const filtered = users.filter(u => {
+    const q = search.toLowerCase();
+    return userName(u).toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q);
+  });
+
+  const handleCreate = async () => {
+    if (!newUser.email.trim()) return;
+    setCreating(true); setCreateErr('');
+    try {
+      const user = await api.glInviteUser({ ...newUser, ...settings });
+      setUsers(p => [user, ...p]);
+      setSelected(user);
+      setMode('list');
+    } catch (e) { setCreateErr(e.message); }
+    setCreating(false);
+  };
+
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Service Contact <span className="text-gray-500 font-normal text-base">— optional</span></h2>
+        <p className="text-gray-400 text-sm">Delivery or service contact for this device</p>
+      </div>
+
+      <div className="flex bg-white bg-opacity-5 rounded-xl p-1 gap-1">
+        {[['list','👤  Pick Existing'],['create','➕  Add New']].map(([m, lbl]) => (
+          <button key={m} onClick={() => setMode(m)}
+            className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${mode === m ? 'bg-emerald-500 text-white' : 'text-gray-400'}`}>
+            {lbl}
+          </button>
+        ))}
+      </div>
+
+      {mode === 'list' ? (
+        <>
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search contacts…"
+            className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
+          {loading ? <Spinner /> : (
+            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+              {filtered.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No contacts found</p>}
+              {filtered.map(user => (
+                <button key={user.id} onClick={() => setSelected(s => s?.id === user.id ? null : user)}
+                  className={`w-full text-left p-4 rounded-2xl border transition-all ${
+                    selected?.id === user.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+                    : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
+                  <p className="text-white font-medium text-sm">{userName(user)}</p>
+                  {userEmail(user) && <p className="text-gray-500 text-xs mt-0.5">{userEmail(user)}</p>}
+                  {selected?.id === user.id && <p className="text-emerald-400 text-xs mt-1">✓ Selected</p>}
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <Card className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <TextInput label="First Name" value={newUser.firstName} onChange={setNU('firstName')} placeholder="Alice" />
+            <TextInput label="Last Name"  value={newUser.lastName}  onChange={setNU('lastName')}  placeholder="Smith" />
+          </div>
+          <TextInput label="Email" value={newUser.email} onChange={setNU('email')} placeholder="alice@example.com" />
+          {createErr && <p className="text-red-400 text-xs">{createErr}</p>}
+          <Btn onClick={handleCreate} disabled={!newUser.email.trim() || creating}>
+            {creating ? 'Adding…' : 'Add Contact'}
+          </Btn>
+        </Card>
+      )}
+
+      <div className="space-y-2.5 pt-1">
+        <Btn onClick={() => onSelect(selected)} disabled={!selected}>
+          {selected ? `Assign ${userName(selected)} →` : 'Select a Contact →'}
+        </Btn>
+        <Btn variant="secondary" onClick={onSkip}>Skip for Now</Btn>
+      </div>
+    </div>
+  );
+};
+
+// ── SCREEN: ADDING TO GREENLAKE (with async polling UI) ───────────────────────
+const AddingScreen = ({ device, settings, api, onSuccess, onBack }) => {
+  const [status, setStatus] = useState('loading');
+  const [msg, setMsg] = useState('Registering device in HPE GreenLake…');
+  const [subMsg, setSubMsg] = useState('This may take up to 30 seconds');
+
+  useEffect(() => {
+    const go = async () => {
+      try {
+        setMsg('Sending device to GreenLake…');
+        setSubMsg('Waiting for async confirmation…');
+        const result = await api.glAddDevice({
+          serial: device.serial, mac: device.mac,
+          tags: device.tags,
+          locationId: device.location?.id,
+          ...settings,
+        });
+        setStatus('success');
+        setMsg(result.foundExisting ? 'Device found in GreenLake!' : 'Device registered!');
+        setSubMsg(result.foundExisting ? 'Already registered — updating attributes only' : '');
+        setTimeout(() => onSuccess(result), 900);
+      } catch (err) {
+        setStatus('error');
+        setMsg(err.message);
+        setSubMsg('');
+      }
+    };
+    go();
+  }, []);
+
+  return (
+    <div className="p-5 step-enter">
+      <div className="pt-2 mb-8">
+        <h2 className="text-white font-bold text-xl">Adding to GreenLake</h2>
+        <p className="text-gray-400 text-sm font-mono">{device.serial}</p>
+      </div>
+      <div className="flex flex-col items-center py-10 space-y-5 text-center">
+        {status === 'loading' && (
+          <>
+            <Spinner size={48} />
+            <div>
+              <p className="text-gray-300 text-sm font-medium">{msg}</p>
+              {subMsg && <p className="text-gray-600 text-xs mt-1">{subMsg}</p>}
+            </div>
+          </>
+        )}
+        {status === 'success' && (
+          <div className="w-20 h-20 bg-emerald-500 bg-opacity-20 rounded-full flex items-center justify-center text-4xl">✓</div>
+        )}
+        {status === 'error' && (
+          <div className="w-full space-y-5">
+            <div className="w-20 h-20 bg-red-500 bg-opacity-20 rounded-full flex items-center justify-center text-4xl mx-auto">✕</div>
+            <ErrorBanner msg={msg} />
+            <Btn variant="secondary" onClick={onBack}>← Go Back</Btn>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+// ── SCREEN: SUBSCRIPTION ──────────────────────────────────────────────────────
+const SubscriptionScreen = ({ settings, api, onSelect, onSkip, deviceType, initialKey }) => {
+  const [subs, setSubs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    api.glGetSubscriptions(settings)
+      .then(d => {
+        const filtered = filterSubscriptions(d, deviceType);
+        setSubs(filtered);
+        if (initialKey) {
+          const match = filtered.find(s => s.key === initialKey);
+          if (match) setSelected(match);
+        }
+        setLoading(false);
+      })
+      .catch(e => { setError(e.message); setLoading(false); });
+  }, []);
+
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Assign Subscription</h2>
+        <p className="text-gray-400 text-sm">Choose a license for this device</p>
+      </div>
+      {loading && <Spinner />}
+      {error && <ErrorBanner msg={error} />}
+      {!loading && !error && (
+        <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+          {subs.length === 0 && <Card><p className="text-gray-400 text-sm text-center py-2">No available subscriptions.</p></Card>}
+          {subs.map((sub, i) => (
+            <button key={sub.id || sub.key || i} onClick={() => setSelected(sub)}
+              className={`w-full text-left p-4 rounded-2xl border transition-all ${
+                selected?.key === sub.key ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+                : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex-1">
+                  <p className="text-white text-sm font-medium leading-snug">{sub.skuDescription}</p>
+                  <p className="text-gray-500 text-xs font-mono mt-1">{sub.key}</p>
+                  {sub.expirationDate && (() => {
+                    const exp = new Date(sub.expirationDate);
+                    const daysLeft = Math.ceil((exp - Date.now()) / 86400000);
+                    const fmtDate = exp.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+                    if (daysLeft <= 0) return null; // shouldn't reach here (filtered), but guard
+                    return (
+                      <p className={`text-xs mt-1 ${daysLeft <= 30 ? 'text-amber-400' : 'text-gray-500'}`}>
+                        {daysLeft <= 30 ? '⚠️ ' : ''}Expires {fmtDate}{daysLeft <= 30 ? ` (${daysLeft}d)` : ''}
+                      </p>
+                    );
+                  })()}
+                </div>
+                <div className="text-right shrink-0">
+                  <p className="text-emerald-400 font-bold text-base">{sub.availableQuantity}</p>
+                  <p className="text-gray-500 text-xs">avail.</p>
+                </div>
+              </div>
+              {selected?.key === sub.key && (
+                <p className="text-emerald-400 text-xs mt-2">
+                  {initialKey && initialKey === sub.key ? '✓ Currently assigned' : '✓ Selected'}
+                </p>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="space-y-2.5 pt-1">
+        <Btn onClick={() => selected && onSelect(selected)} disabled={!selected || loading}>Assign →</Btn>
+        <Btn variant="secondary" onClick={onSkip}>Skip for Now</Btn>
+      </div>
+    </div>
+  );
+};
+
+// Known region ID → friendly label mapping
+// us-east-1 is noted as potentially Internal for HPE employees
+const REGION_LABELS = {
+  'us-west':    'US West',
+  'us-west-2':  'US West 2',
+  'us-west-4':  'US West 4',
+  'us-west-5':  'US West 5',
+  'us-east':    'US East',
+  'us-east-1':  'US East 1',
+  'eu-central': 'EU Central',
+  'eu-central-2':'EU Central 2',
+  'eu-central-3':'EU Central 3',
+  'eu-west':    'EU West',
+  'eu-west-2':  'EU West (UK)',
+  'ap-south':   'APAC South',
+  'ap-south-1': 'APAC South 1',
+  'ap-east':    'APAC East',
+  'ap-east-1':  'APAC East 1',
+  'ca-west':    'Canada West',
+  'ca-west-1':  'Canada West 1',
+  'me-east':    'Middle East',
+  'me-north-1': 'UAE North',
+  'cn-north':   'China North',
+  'internal':   'Internal (HPE)',
+};
+const regionLabel = id => REGION_LABELS[id] || id;
+
+// ── SCREEN: SERVICE (was Application) ────────────────────────────────────────
+const ApplicationScreen = ({ settings, api, onSelect, deviceType }) => {
+  const [apps, setApps] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [error, setError] = useState('');
+  const isUxi = deviceType === 'UXI';
+
+  useEffect(() => {
+    api.glGetApplications(settings)
+      .then(d => {
+        // Filter to only relevant apps: UXI devices → UXI only; all others → Aruba Central only
+        const filtered = d.filter(app => {
+          const name = (app.name || '').toLowerCase();
+          if (isUxi) return name.includes('uxi');
+          return name.includes('central') || name.includes('aruba networking');
+        });
+        setApps(filtered);
+        setLoading(false);
+        // Auto-select if only one option or the expected app is present
+        const match = filtered.find(a => (a.name || '').toLowerCase().includes(isUxi ? 'uxi' : 'central'));
+        const auto = match || (filtered.length === 1 ? filtered[0] : null);
+        if (auto) setSelected(auto);
+      })
+      .catch(e => { setError(e.message); setLoading(false); });
+  }, []);
+
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Assign Service</h2>
+        <p className="text-gray-400 text-sm">Which GreenLake Service manages this device?</p>
+      </div>
+
+      {loading && <Spinner />}
+      {error && <ErrorBanner msg={error} />}
+
+      {!loading && !error && (
+        <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+          {apps.length === 0 && (
+            <Card><p className="text-gray-400 text-sm text-center py-2">No provisioned services found in this workspace.</p></Card>
+          )}
+          {apps.map(app => (
+            <button key={app.id} onClick={() => setSelected(app)}
+              className={`w-full text-left p-4 rounded-2xl border transition-all ${
+                selected?.id === app.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+                : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">🌐</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-white font-medium text-sm">{app.name}</p>
+                  {(app.regionName || app.region) && (
+                    <p className="text-gray-500 text-xs mt-0.5">📍 {app.regionName || regionLabel(app.region)}</p>
+                  )}
+                </div>
+                {selected?.id === app.id && <span className="text-emerald-400 shrink-0">✓</span>}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      <Btn onClick={() => selected && onSelect(selected)} disabled={!selected || loading}>
+        Continue →
+      </Btn>
+    </div>
+  );
+};
+
+// ── SCREEN: SITE ──────────────────────────────────────────────────────────────
+const SiteScreen = ({ settings, api, onSelect, onSkip }) => {
+  const [sites, setSites] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [search, setSearch] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    api.centralGetSites(settings)
+      .then(d => { setSites(d); setLoading(false); })
+      .catch(e => { setError(e.message); setLoading(false); });
+  }, []);
+
+  const filtered = sites.filter(s =>
+    (s.name || '').toLowerCase().includes(search.toLowerCase()) ||
+    (s.city || '').toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Assign Site</h2>
+        <p className="text-gray-400 text-sm">Where is this device being installed?</p>
+      </div>
+      <div className="flex items-start gap-2 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-xl px-4 py-3">
+        <span className="text-amber-400 text-sm shrink-0">⚠</span>
+        <p className="text-amber-300 text-xs leading-relaxed">Site assignment in New Central is coming soon. Select a site for reference — Please assign manually in Aruba Central Classic.</p>
+      </div>
+      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search sites…"
+        className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
+      {loading && <Spinner />}
+      {error && <ErrorBanner msg={error} />}
+      <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+        {!loading && filtered.map(site => (
+          <button key={site.id} onClick={() => setSelected(site)}
+            className={`w-full text-left p-4 rounded-2xl border transition-all ${
+              selected?.id === site.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+              : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
+            <p className="text-white font-medium text-sm">{site.name}</p>
+            {(site.city || site.state) && <p className="text-gray-500 text-xs mt-0.5">{[site.city, site.state].filter(Boolean).join(', ')}</p>}
+            {selected?.id === site.id && <p className="text-emerald-400 text-xs mt-1.5">✓ Selected</p>}
+          </button>
+        ))}
+      </div>
+      <div className="space-y-2.5 pt-1">
+        <Btn onClick={() => onSelect(selected)} disabled={!selected}>
+          {selected ? `Use "${selected.name}" →` : 'Select a Site →'}
+        </Btn>
+        <Btn variant="secondary" onClick={() => onSkip()}>Skip for Now</Btn>
+      </div>
+    </div>
+  );
+};
+
+// ── SCREEN: DEVICE FUNCTION ───────────────────────────────────────────────────
+const FunctionScreen = ({ onSelect, onSkip, deviceType }) => {
+  const [selected, setSelected] = useState(null);
+  const allowed = deviceType ? (PERSONA_BY_DEVICE_TYPE[deviceType] || DEVICE_FUNCTIONS.map(f => f.id)) : DEVICE_FUNCTIONS.map(f => f.id);
+  const filtered = DEVICE_FUNCTIONS.filter(fn => allowed.includes(fn.id));
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Device Function</h2>
+        <p className="text-gray-400 text-sm">What role will this device play in Central?</p>
+      </div>
+      <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1">
+        {filtered.map(fn => (
+          <button key={fn.id} onClick={() => setSelected(fn)}
+            className={`w-full text-left p-4 rounded-2xl border transition-all ${
+              selected?.id === fn.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+              : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
+            <div className="flex items-center gap-4">
+              <span className="text-2xl">{fn.icon}</span>
+              <div className="flex-1">
+                <p className="text-white font-semibold text-sm">{fn.label}</p>
+                <p className="text-gray-500 text-xs mt-0.5">{fn.desc}</p>
+              </div>
+              {selected?.id === fn.id && <span className="text-emerald-400">✓</span>}
+            </div>
+          </button>
+        ))}
+      </div>
+      <div className="space-y-2.5 pt-1">
+        <Btn onClick={() => onSelect(selected)} disabled={!selected}>
+          {selected ? `${selected.label} →` : 'Select a Function →'}
+        </Btn>
+        <Btn variant="secondary" onClick={() => onSkip()}>Skip for Now</Btn>
+      </div>
+    </div>
+  );
+};
+
+// ── SCREEN: REVIEW ────────────────────────────────────────────────────────────
+const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
+  const isUxi = summary.deviceType === 'UXI';
+  const [submitting, setSubmitting] = useState(false);
+  const [stepStatus, setStepStatus] = useState({
+    subscription: summary.subscription ? 'pending' : 'skipped',
+    application: 'pending',
+    site: isUxi ? 'skipped' : 'pending',
+    function: (isUxi || !summary.deviceFunction) ? 'skipped' : 'pending',
+  });
+  const [errorMsg, setErrorMsg] = useState('');
+  const set = (k, v) => setStepStatus(p => ({ ...p, [k]: v }));
+
+  const centralUrl = CLUSTERS.find(c => c.id === settings.centralCluster)?.url || CLUSTERS[0].url;
+
+  const handleProvision = async () => {
+    setSubmitting(true); setErrorMsg('');
+    // Helper: run an assignment step; treat GreenLake 500s as soft failures
+    // (device likely already assigned from a prior run — not a fatal error).
+    const assignStep = async (key, fn) => {
+      console.log(`[provision] starting step: ${key}`);
+      set(key, 'loading');
+      try {
+        await fn();
+        console.log(`[provision] step succeeded: ${key}`);
+        set(key, 'success');
+      } catch (err) {
+        const isServerErr = err.errorCode === 'HPE_GL_ERROR_INTERNAL_SERVER_ERROR'
+          || (err.message || '').toLowerCase().includes('internal server error');
+        if (isServerErr) {
+          // 500 almost always means the item is already assigned — silently skip
+          set(key, 'skipped');
+        } else {
+          throw err;
+        }
+      }
+    };
+
+    try {
+      if (summary.subscription) {
+        await assignStep('subscription', () =>
+          api.glAssignSubscription({ deviceId: summary.deviceId, subscriptionId: summary.subscription.id, ...settings })
+        );
+      }
+      await assignStep('application', () =>
+        api.glAssignApplication({ deviceId: summary.deviceId, applicationId: summary.application.id, region: summary.applicationRegion, ...settings })
+      );
+      if (!isUxi) {
+        // Site assignment API not available on any cluster — skip silently.
+        // The site dropdown is kept in the UI for reference but no API call is made.
+        set('site', 'skipped');
+        if (summary.deviceFunction) {
+          set('function', 'loading');
+          try {
+            await api.centralAssignFunction({ deviceId: summary.deviceId, serial: summary.serial, persona: summary.deviceFunction.id, ...settings, centralUrl });
+            set('function', 'success');
+          } catch (fnErr) {
+            if (fnErr.softFail) {
+              set('function', 'skipped');
+              setErrorMsg(prev => [prev, fnErr.message].filter(Boolean).join('\n'));
+            } else {
+              throw fnErr;
+            }
+          }
+        }
+      }
+      setTimeout(onDone, 600);
+    } catch (err) {
+      setStepStatus(p => {
+        const n = { ...p };
+        Object.keys(n).forEach(k => { if (n[k] === 'loading') n[k] = 'error'; });
+        return n;
+      });
+      setErrorMsg(err.message);
+      setSubmitting(false);
+    }
+  };
+
+  const rows = [
+    { label: 'Serial',       value: summary.serial,                         mono: true },
+    { label: 'MAC',          value: summary.mac,                            mono: true },
+    { label: 'Tags',         value: Object.keys(summary.tags || {}).length > 0 ? `${Object.keys(summary.tags).length} tag(s)` : 'None' },
+    { label: 'Location',     value: summary.location?.name || 'None' },
+    { label: 'Contact',      value: summary.contact ? `${userName(summary.contact)}${summary.contact.email ? ` — ${summary.contact.email}` : ''}` : 'None' },
+    { label: 'Subscription', value: summary.subscription?.skuDescription || 'Skip', step: 'subscription' },
+    { label: 'Service',      value: summary.application?.name,              step: 'application' },
+    { label: 'Region',       value: summary.application?.regionName || regionLabel(summary.applicationRegion) },
+    { label: 'Site',         value: summary.site?.name,                     step: 'site' },
+    { label: 'Function',     value: summary.deviceFunction?.label,          step: 'function' },
+  ];
+
+  return (
+    <div className="p-5 space-y-5 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Review & Confirm</h2>
+        <p className="text-gray-400 text-sm">Everything looks good? Let's provision.</p>
+      </div>
+      <Card className="space-y-0 divide-y divide-white divide-opacity-5">
+        {rows.map(row => (
+          <div key={row.label} className="flex items-center justify-between py-3 gap-3">
+            <span className="text-gray-400 text-sm shrink-0">{row.label}</span>
+            <div className="flex items-center gap-2 min-w-0">
+              {row.step && submitting && <Badge status={stepStatus[row.step]} />}
+              <span className={`text-white text-sm ${row.mono ? 'font-mono' : 'font-medium'} truncate`}>{row.value || '—'}</span>
+            </div>
+          </div>
+        ))}
+      </Card>
+      {errorMsg && <ErrorBanner msg={errorMsg} />}
+      {!submitting ? (
+        <div className="space-y-2.5">
+          <Btn onClick={handleProvision}>🚀 Provision Device</Btn>
+        </div>
+      ) : (
+        <div className="bg-white bg-opacity-5 rounded-2xl p-4 text-center space-y-2">
+          <Spinner size={28} />
+          <p className="text-gray-400 text-sm">Provisioning… please wait</p>
+          <p className="text-gray-600 text-xs">Async operations can take up to 30s each</p>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── SCREEN: SUCCESS ───────────────────────────────────────────────────────────
+const SuccessScreen = ({ summary, onAnother }) => (
+  <div className="p-5 space-y-6 step-enter">
+    <div className="flex flex-col items-center pt-10 pb-4 space-y-4">
+      <div className="w-24 h-24 bg-emerald-500 bg-opacity-20 border border-emerald-500 border-opacity-30 rounded-full flex items-center justify-center text-5xl">✓</div>
+      <div className="text-center">
+        <h2 className="text-white font-bold text-2xl">Device Onboarded!</h2>
+        <p className="text-gray-400 text-sm mt-1">Successfully provisioned and assigned</p>
+      </div>
+    </div>
+    <Card className="space-y-0 divide-y divide-white divide-opacity-5">
+      {[
+        ['Serial',       summary.serial,                                  true ],
+        ['Site',         summary.site?.name,                              false],
+        ['Function',     summary.deviceFunction?.label,                   false],
+        ['Application',  summary.application?.name,                       false],
+        ['Subscription', summary.subscription?.skuDescription || 'None', false],
+        ['Tags',         Object.keys(summary.tags || {}).length > 0 ? Object.entries(summary.tags).map(([k,v]) => `${k}${v?':'+v:''}`).join(', ') : 'None', false],
+      ].map(([label, value, mono]) => (
+        <div key={label} className="flex justify-between py-3 gap-3">
+          <span className="text-gray-400 text-sm">{label}</span>
+          <span className={`text-white text-sm ${mono ? 'font-mono' : 'font-medium'} text-right truncate max-w-[200px]`}>{value || '—'}</span>
+        </div>
+      ))}
+    </Card>
+    <Btn onClick={onAnother}>📡 Onboard Another Device</Btn>
+  </div>
+);
+
+// ── APP ────────────────────────────────────────────────────────────────────────
+const STEPS = ['scan','tags','location','contact','adding_gl','device_type','subscription','application','site','function','review'];
+// device_type is a fallback screen — give it the same progress value as subscription so the bar doesn't jump.
+const STEP_PROGRESS = { scan:0, tags:1, location:2, contact:3, adding_gl:4, device_type:5, subscription:5, application:6, site:7, function:8, review:9 };
+const TOTAL_STEPS = 9;
+
+const defaultSettings = () => ({
+  glClientId: '', glClientSecret: '', workspaceId: '',
+  centralCluster: 'eu1',
+  demoMode: false,
+  scanConfirm: true,
+});
+
+const App = () => {
+  const [screen, setScreen] = useState('boot');
+  const [settings, setSettings] = useState(() => {
+    try { return { ...defaultSettings(), ...JSON.parse(localStorage.getItem('aruba_cfg2') || '{}') }; }
+    catch { return defaultSettings(); }
+  });
+  const [summary, setSummary] = useState({});
+  const [tokenError, setTokenError] = useState(null);
+  const glTokenRef = useRef({ token: null, expiry: 0 });
+
+  const upd = patch => setSummary(p => ({ ...p, ...patch }));
+
+  // Resolve which API set to use
+  const api = settings.demoMode ? demoApi : liveApi;
+
+  const getGlToken = useCallback(async () => {
+    if (settings.demoMode) return 'demo';
+    const now = Date.now();
+    if (glTokenRef.current.token && glTokenRef.current.expiry > now) return glTokenRef.current.token;
+    // Unified mode: workspace-scoped GL endpoint + Basic Auth (per pycentral v2 SDK)
+    const wsId = settings.workspaceId?.trim();
+    const url  = wsId ? unifiedTokenUrl(wsId) : TOKEN_URL;
+    const { token, expiresAt } = await fetchToken(settings.glClientId, settings.glClientSecret, 'GreenLake', url, !!wsId);
+    glTokenRef.current = { token, expiry: expiresAt };
+    return token;
+  }, [settings.demoMode, settings.glClientId, settings.glClientSecret, settings.workspaceId]);
+
+  useEffect(() => {
+    const hasGlCreds = settings.glClientId && settings.glClientSecret;
+    const hasConfig  = settings.demoMode || (hasGlCreds && settings.workspaceId?.trim());
+    if (hasConfig) {
+      // Pre-fetch token on startup so errors surface immediately on the scan screen
+      setScreen('scan');
+      if (!settings.demoMode && hasGlCreds) {
+        const centralUrl = CLUSTERS.find(c => c.id === settings.centralCluster)?.url || CLUSTERS[0].url;
+        getGlToken()
+          .then(token => {
+            setTokenError(null);
+            setLiveSettings(s => ({ ...s, token, centralToken: token, centralUrl }));
+          })
+          .catch(e => {
+            console.error('Startup token fetch failed:', e);
+            setTokenError(e.message);
+          });
+      }
+    } else {
+      const welcomed = localStorage.getItem('aruba_welcomed');
+      setScreen(welcomed ? 'settings' : 'welcome');
+    }
+  }, []);
+
+  const saveSettings = s => {
+    const toStore = {
+      glClientId: s.glClientId, glClientSecret: s.glClientSecret, workspaceId: s.workspaceId,
+      centralCluster: s.centralCluster, demoMode: s.demoMode, scanConfirm: s.scanConfirm,
+    };
+    localStorage.setItem('aruba_cfg2', JSON.stringify(toStore));
+    glTokenRef.current = { token: null, expiry: 0 };
+    setSettings(s);
+    // Sync liveSettings immediately so display-only fields (demoMode, scanConfirm, etc.)
+    // update right away without waiting for the next token fetch.
+    setLiveSettings(prev => ({ ...prev, ...toStore }));
+    setScreen('scan');
+  };
+
+  const showProgress = !['settings','success','boot'].includes(screen);
+  const currentStep = STEP_PROGRESS[screen] ?? 0;
+  const backTarget = {
+    tags:        'scan',
+    location:    'tags',
+    contact:     'location',
+    application: 'subscription',
+    site:        'application',
+    function:    'site',
+    review:      summary.deviceType === 'UXI' ? 'application' : 'function',
+    settings:    'scan',
+  }[screen] ?? null;
+
+  const [liveSettings, setLiveSettings] = useState(settings);
+  const enterScreen = useCallback(async (next) => {
+    const centralUrl = CLUSTERS.find(c => c.id === settings.centralCluster)?.url || CLUSTERS[0].url;
+    if (!settings.demoMode && settings.glClientId) {
+      try {
+        const token = await getGlToken();
+        setTokenError(null);
+        setLiveSettings({ ...settings, token, centralToken: token, centralUrl });
+      } catch(e) {
+        console.error('Token refresh failed:', e);
+        setTokenError(e.message);
+        setLiveSettings({ ...settings, centralUrl });
+      }
+    } else {
+      setLiveSettings({ ...settings, centralUrl });
+    }
+    setScreen(next);
+  }, [settings, getGlToken]);
+
+  return (
+    <div className="min-h-screen" style={{ background: '#111827', maxWidth: 480, margin: '0 auto' }}>
+      {/* Header */}
+      {screen !== 'welcome' && <div className="sticky top-0 z-20 pt-safe" style={{ background: '#111827' }}>
+        <div className="flex items-center gap-3 px-5 pt-12 pb-3">
+          <button
+            onClick={backTarget ? () => setScreen(backTarget) : undefined}
+            className={`p-1.5 rounded-lg shrink-0 transition-all duration-200 ${backTarget ? 'text-gray-400 hover:text-white hover:bg-white hover:bg-opacity-10 opacity-100' : 'opacity-0 pointer-events-none'}`}
+            title="Go back"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="15 18 9 12 15 6"/>
+            </svg>
+          </button>
+          <img src={HPE_LOGO} alt="HPE" className="h-7 w-auto shrink-0 object-contain" />
+          <div>
+            <h1 className="text-white font-bold text-[15px] leading-tight">Networking - Device Onboarder</h1>
+            <p className="text-gray-500 text-xs">GreenLake + Aruba Central Provisioning</p>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            {settings.demoMode && (
+              <span className="text-xs bg-yellow-500 bg-opacity-20 text-yellow-400 px-2.5 py-1 rounded-full font-semibold">Demo</span>
+            )}
+            {showProgress && (
+              <button
+                onClick={() => { setSummary({}); setScreen('scan'); }}
+                className="text-gray-400 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-white hover:bg-opacity-10"
+                title="Start over"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                  <polyline points="9 22 9 12 15 12 15 22"/>
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+        {showProgress && <ProgressSteps step={currentStep} total={TOTAL_STEPS} />}
+        {summary.deviceType && !['scan','tags','location','contact','adding_gl','settings','success','boot'].includes(screen) && (
+          <DeviceChip deviceType={summary.deviceType} model={summary.deviceModel} partNumber={summary.devicePartNumber} serial={summary.serial} />
+        )}
+      </div>}
+
+      {/* Screens */}
+      <div className="pb-16">
+        {screen === 'boot' && <div className="flex justify-center pt-20"><Spinner size={44} /></div>}
+
+        {screen === 'welcome' && (
+          <WelcomeScreen onDismiss={() => {
+            localStorage.setItem('aruba_welcomed', '1');
+            setScreen('settings');
+          }} />
+        )}
+
+        {screen === 'settings' && (
+          <SettingsScreen settings={settings} onSave={saveSettings}
+            onBack={summary.serial ? () => setScreen('scan') : null} />
+        )}
+
+        {screen === 'scan' && (
+          <>
+            {tokenError && (
+              <div className="mx-5 mb-3 p-3 rounded-xl bg-red-900/40 border border-red-500/40">
+                <p className="text-red-400 text-xs font-semibold mb-1">⚠️ Authentication Error</p>
+                <p className="text-red-300 text-xs leading-relaxed">{tokenError}</p>
+                <button className="mt-2 text-red-400 underline text-xs" onClick={() => setTokenError(null)}>Dismiss</button>
+              </div>
+            )}
+            <ScanScreen settings={liveSettings}
+              onScanned={(d, raw) => { upd({ ...d, rawBarcode: raw }); enterScreen('tags'); }}
+              onOpenSettings={() => setScreen('settings')} />
+          </>
+        )}
+
+        {screen === 'tags' && (
+          <TagsScreen settings={liveSettings} api={api}
+            onNext={tags => { upd({ tags }); enterScreen('location'); }} />
+        )}
+
+        {screen === 'location' && (
+          <LocationScreen settings={liveSettings} api={api}
+            onNext={loc => { upd({ location: loc }); enterScreen('contact'); }} />
+        )}
+
+        {screen === 'contact' && (
+          <ContactScreen settings={liveSettings} api={api}
+            onSelect={contact => { upd({ contact }); enterScreen('adding_gl'); }}
+            onSkip={() => { upd({ contact: null }); enterScreen('adding_gl'); }} />
+        )}
+
+        {screen === 'adding_gl' && (
+          <AddingScreen device={summary} settings={liveSettings} api={api}
+            onSuccess={device => {
+              const glType = (device.deviceType || '').toUpperCase();
+              const mapped = GL_DEVICE_TYPE_MAP[glType] || null;
+              console.log('[auto-detect] GL deviceType:', glType, '→ app type:', mapped);
+              upd({
+                deviceId: device.id,
+                deviceType: mapped,
+                deviceModel: device.model || device.deviceModel || null,
+                devicePartNumber: device.partNumber || null,
+                foundExisting:          device.foundExisting || false,
+                currentSubscriptionKey: device.subscription?.key || null,
+                currentApplicationId:   device.application?.id  || null,
+              });
+              enterScreen(mapped ? 'subscription' : 'device_type');
+            }}
+            onBack={() => setScreen('location')} />
+        )}
+
+        {screen === 'device_type' && (
+          <DeviceTypeScreen device={summary}
+            onSelect={type => { upd({ deviceType: type }); enterScreen('subscription'); }} />
+        )}
+
+        {screen === 'subscription' && (
+          <SubscriptionScreen settings={liveSettings} api={api} deviceType={summary.deviceType}
+            initialKey={summary.currentSubscriptionKey}
+            onSelect={sub => { upd({ subscription: sub }); enterScreen('application'); }}
+            onSkip={() => { upd({ subscription: null }); enterScreen('application'); }} />
+        )}
+
+        {screen === 'application' && (
+          <ApplicationScreen settings={liveSettings} api={api} deviceType={summary.deviceType}
+            onSelect={(app) => { upd({ application: app, applicationRegion: app.region }); enterScreen(summary.deviceType === 'UXI' ? 'review' : 'site'); }} />
+        )}
+
+        {screen === 'site' && (
+          <SiteScreen settings={liveSettings} api={api}
+            onSelect={site => { upd({ site }); enterScreen('function'); }}
+            onSkip={() => { upd({ site: null }); enterScreen('function'); }} />
+        )}
+
+        {screen === 'function' && (
+          <FunctionScreen deviceType={summary.deviceType}
+            onSelect={fn => { upd({ deviceFunction: fn }); setScreen('review'); }}
+            onSkip={() => { upd({ deviceFunction: null }); setScreen('review'); }} />
+        )}
+
+        {screen === 'review' && (
+          <ReviewScreen summary={summary} settings={liveSettings} api={api}
+            onDone={() => setScreen('success')}
+            onBack={() => setScreen(summary.deviceType === 'UXI' ? 'application' : 'function')} />
+        )}
+
+        {screen === 'success' && (
+          <SuccessScreen summary={summary}
+            onAnother={() => { setSummary({}); enterScreen('scan'); }} />
+        )}
+      </div>
+    </div>
+  );
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
