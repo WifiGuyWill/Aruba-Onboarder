@@ -1382,10 +1382,10 @@ const DeviceTypeScreen = ({ device, onSelect }) => {
 };
 
 // ── SCREEN: TAGS (optional) ───────────────────────────────────────────────────
-const TagsScreen = ({ settings, api, onNext }) => {
+const TagsScreen = ({ settings, api, onNext, initialTags }) => {
   const [existingTags, setExistingTags] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState({});  // key -> value
+  const [selected, setSelected] = useState(initialTags && typeof initialTags === 'object' ? initialTags : {});  // key -> value
   const [customKey, setCustomKey] = useState('');
   const [customVal, setCustomVal] = useState('');
 
@@ -1481,7 +1481,7 @@ const TagsScreen = ({ settings, api, onNext }) => {
 };
 
 // ── SCREEN: LOCATION (optional) ───────────────────────────────────────────────
-const LocationScreen = ({ settings, api, onNext }) => {
+const LocationScreen = ({ settings, api, onNext, initialId }) => {
   const [locations, setLocations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
@@ -1494,7 +1494,14 @@ const LocationScreen = ({ settings, api, onNext }) => {
 
   useEffect(() => {
     api.glGetLocations(settings)
-      .then(locs => { setLocations(locs); setLoading(false); })
+      .then(locs => {
+        setLocations(locs);
+        if (initialId) {
+          const match = locs.find(l => String(l.id) === String(initialId));
+          if (match) setSelected(match);
+        }
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, []);
 
@@ -1912,7 +1919,7 @@ const ApplicationScreen = ({ settings, api, onSelect, deviceType }) => {
 };
 
 // ── SCREEN: SITE ──────────────────────────────────────────────────────────────
-const SiteScreen = ({ settings, api, onSelect, onSkip }) => {
+const SiteScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
   const [sites, setSites] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
@@ -1921,7 +1928,14 @@ const SiteScreen = ({ settings, api, onSelect, onSkip }) => {
 
   useEffect(() => {
     api.centralGetSites(settings)
-      .then(d => { setSites(d); setLoading(false); })
+      .then(d => {
+        setSites(d);
+        if (initialId) {
+          const match = d.find(s => String(s.id) === String(initialId));
+          if (match) setSelected(match);
+        }
+        setLoading(false);
+      })
       .catch(e => { setError(e.message); setLoading(false); });
   }, []);
 
@@ -1967,10 +1981,10 @@ const SiteScreen = ({ settings, api, onSelect, onSkip }) => {
 };
 
 // ── SCREEN: DEVICE FUNCTION ───────────────────────────────────────────────────
-const FunctionScreen = ({ onSelect, onSkip, deviceType }) => {
-  const [selected, setSelected] = useState(null);
+const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
   const allowed = deviceType ? (PERSONA_BY_DEVICE_TYPE[deviceType] || DEVICE_FUNCTIONS.map(f => f.id)) : DEVICE_FUNCTIONS.map(f => f.id);
   const filtered = DEVICE_FUNCTIONS.filter(fn => allowed.includes(fn.id));
+  const [selected, setSelected] = useState(() => initialId ? (filtered.find(fn => fn.id === initialId) || null) : null);
   return (
     <div className="p-5 space-y-4 step-enter">
       <div className="pt-2">
@@ -2343,12 +2357,20 @@ const App = () => {
 
         {screen === 'tags' && (
           <TagsScreen settings={liveSettings} api={api}
-            onNext={tags => { upd({ tags }); enterScreen('location'); }} />
+            initialTags={(() => { try { return JSON.parse(localStorage.getItem('aruba_last_tags')); } catch(e) { return null; } })()}
+            onNext={tags => {
+              if (Object.keys(tags).length > 0) localStorage.setItem('aruba_last_tags', JSON.stringify(tags));
+              upd({ tags }); enterScreen('location');
+            }} />
         )}
 
         {screen === 'location' && (
           <LocationScreen settings={liveSettings} api={api}
-            onNext={loc => { upd({ location: loc }); enterScreen('contact'); }} />
+            initialId={localStorage.getItem('aruba_last_location')}
+            onNext={loc => {
+              if (loc?.id) localStorage.setItem('aruba_last_location', String(loc.id));
+              upd({ location: loc }); enterScreen('contact');
+            }} />
         )}
 
         {screen === 'contact' && (
@@ -2384,8 +2406,11 @@ const App = () => {
 
         {screen === 'subscription' && (
           <SubscriptionScreen settings={liveSettings} api={api} deviceType={summary.deviceType}
-            initialKey={summary.currentSubscriptionKey}
-            onSelect={sub => { upd({ subscription: sub }); enterScreen('application'); }}
+            initialKey={summary.currentSubscriptionKey || localStorage.getItem('aruba_last_sub')}
+            onSelect={sub => {
+              localStorage.setItem('aruba_last_sub', sub.key);
+              upd({ subscription: sub }); enterScreen('application');
+            }}
             onSkip={() => { upd({ subscription: null }); enterScreen('application'); }} />
         )}
 
@@ -2396,13 +2421,21 @@ const App = () => {
 
         {screen === 'site' && (
           <SiteScreen settings={liveSettings} api={api}
-            onSelect={site => { upd({ site }); enterScreen('function'); }}
+            initialId={localStorage.getItem('aruba_last_site')}
+            onSelect={site => {
+              localStorage.setItem('aruba_last_site', String(site.id));
+              upd({ site }); enterScreen('function');
+            }}
             onSkip={() => { upd({ site: null }); enterScreen('function'); }} />
         )}
 
         {screen === 'function' && (
           <FunctionScreen deviceType={summary.deviceType}
-            onSelect={fn => { upd({ deviceFunction: fn }); setScreen('review'); }}
+            initialId={localStorage.getItem('aruba_last_function')}
+            onSelect={fn => {
+              localStorage.setItem('aruba_last_function', fn.id);
+              upd({ deviceFunction: fn }); setScreen('review');
+            }}
             onSkip={() => { upd({ deviceFunction: null }); setScreen('review'); }} />
         )}
 
