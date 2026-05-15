@@ -27,7 +27,11 @@ Browser → /proxy (Cloudflare Pages Function) → HPE GreenLake / Aruba Central
 3. Upload the entire `aruba-onboarder/` folder
 4. Cloudflare will auto-detect `functions/proxy.js` and deploy it as a Pages Function at `/proxy`
 
-Alternatively, connect a GitHub repo and push this folder — Cloudflare will build and deploy on every push.
+Alternatively, deploy via the Wrangler CLI:
+```bash
+npx wrangler pages deploy . --project-name aruba-onboarder --branch production
+```
+> The `--branch production` flag is required to create a Production deployment (not a Preview). Without it, deploys show as Preview and the custom domain won't update.
 
 ---
 
