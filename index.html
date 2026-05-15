@@ -29,9 +29,6 @@
 </head>
 <body>
 <div id="root"></div>
-<script>
-var HPE_LOGO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHsAAAAjCAYAAAC0GnXlAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAI8SURBVHgB7dpBctMwGAXgp0735AbVEXKE5ATAkl04Ad2yqjOwpzkBWXcDnCDmBuYEcU9A2EPF09gLholkRansyP6/mX/cGdl12jeSJTnKEBwUIQHecsHDztFc8rbLjusLHu6QTt1WxfrOz/MVkfhZ9zxoDG99BXGMZi1Yt6wvDOwn6zNLI2MSdpgZa8XaM/CUI0pSEvbpCtvLkSEJO84qx8Al7Hg28Ftk5BrjU7UVS/9TXe4Y+Jaz9QPi2Fl+7LWnquzSwAmJ2KWX57a7gOsLz/UFnoGdedsgTbei4/fsPddq9EiGcQf21pq14o/LjlPfIRMSdgcGXvKw9pwyM80mkUvtqV6N8Zmdwj2aHjxztM9Z5bGGrt3APknPDtBOwHyTPo0MSNjhHj1tL5ABGcYTUw8fdriAPXVlsPGGnXL5laEbT9svZ0sTtMbQlJnJMB5u7mnra2PkLBJ2AA5wK7hn4laJDEjYHRi07dHe15rtWvziSdgODNlultiQ7fat9py6RSbGOBt/yZBuEM8O17Y368Dz14imKqh+nvdPf1B3hb1FGhrN135SmMM/mXpOG7uHjkjm6fo13ryv0RNv2PxD3iKBdi95gbxV/P9k9T5bntlx7Nbpxex5h5KwT7dhLc/4wsJgZLs0XMla57LMOkbCdqvRBPyDtc2xJ/9vjGHbYfYe8Q5jCPaYMYZ9OGc5NGYyjA9IXf3+pB4+9jKKKGO+SdiDMq/6e4tsHmXpNSES9oRI2BMiYU+IhD0hfwF4Uz92paqz3wAAAABJRU5ErkJggg==";
-</script>
 <script type="text/babel">
 const { useState, useEffect, useRef, useCallback } = React;
 
@@ -2283,7 +2280,7 @@ const App = () => {
               <polyline points="15 18 9 12 15 6"/>
             </svg>
           </button>
-          <img src={HPE_LOGO} alt="HPE" className="h-7 w-auto shrink-0 object-contain" />
+          <span className="text-2xl leading-none shrink-0">🌐</span>
           <div>
             <h1 className="text-white font-bold text-[15px] leading-tight">Networking - Device Onboarder</h1>
             <p className="text-gray-500 text-xs">GreenLake + Aruba Central Provisioning</p>
