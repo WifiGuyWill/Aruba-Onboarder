@@ -1592,7 +1592,7 @@ const userName = u => {
 };
 const userEmail = u => u.email || u.username || u.profile?.email || '';
 
-const ContactScreen = ({ settings, api, onSelect, onSkip }) => {
+const ContactScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
   const [users, setUsers]       = useState([]);
   const [loading, setLoading]   = useState(true);
   const [selected, setSelected] = useState(null);
@@ -1605,7 +1605,14 @@ const ContactScreen = ({ settings, api, onSelect, onSkip }) => {
 
   useEffect(() => {
     api.glGetUsers(settings)
-      .then(u => { setUsers(u); setLoading(false); })
+      .then(u => {
+        setUsers(u);
+        if (initialId) {
+          const match = u.find(user => String(user.id) === String(initialId));
+          if (match) setSelected(match);
+        }
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, []);
 
@@ -2375,7 +2382,11 @@ const App = () => {
 
         {screen === 'contact' && (
           <ContactScreen settings={liveSettings} api={api}
-            onSelect={contact => { upd({ contact }); enterScreen('adding_gl'); }}
+            initialId={localStorage.getItem('aruba_last_contact')}
+            onSelect={contact => {
+              if (contact?.id) localStorage.setItem('aruba_last_contact', String(contact.id));
+              upd({ contact }); enterScreen('adding_gl');
+            }}
             onSkip={() => { upd({ contact: null }); enterScreen('adding_gl'); }} />
         )}
 
