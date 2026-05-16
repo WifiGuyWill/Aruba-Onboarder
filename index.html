@@ -493,7 +493,8 @@ const liveApi = {
       // subscription is returned as an array — extract the first entry's key
       const subArr = Array.isArray(device.subscription) ? device.subscription : (device.subscription ? [device.subscription] : []);
       const subKey = subArr[0]?.key || null;
-      console.log('[glLookupDevice] found:', device.id, '| tags:', JSON.stringify(device.tags), '| contact:', JSON.stringify(device.contact), '| location:', device.location?.id, '| subscription:', subKey, '| application:', device.application?.id);
+      const contactId = device.contact?.workspaceUser?.id || device.contact?.id || null;
+      console.log('[glLookupDevice] found:', device.id, '| tags:', JSON.stringify(device.tags), '| contactId:', contactId, '| location:', device.location?.id, '| subscription:', subKey, '| application:', device.application?.id);
       // Normalise subscription to a plain object for downstream code
       device._subKey = subKey;
       device._subId  = subArr[0]?.id  || null;
@@ -741,28 +742,30 @@ const liveApi = {
     throw new Error(`Sites API not available on cluster: ${centralUrl}`);
   },
 
-  // Lightweight Central lookup: returns the numeric site ID currently assigned to a device.
-  // Uses the config-devices list which already contains siteId per device.
-  // Called as a background task right after scan so SiteScreen can be pre-populated.
+  // Lightweight Central lookup: returns the siteId and persona currently assigned to a device.
+  // Uses the config-devices list which already contains both fields per device.
+  // Called as a background task right after scan so SiteScreen + FunctionScreen can be pre-populated.
+  // Returns { siteId: string|null, persona: string|null }
   async centralGetDeviceSiteId({ serial, centralToken, centralUrl }) {
-    if (!centralToken || !centralUrl || !serial) return null;
+    if (!centralToken || !centralUrl || !serial) return { siteId: null, persona: null };
     try {
       const res = await proxyCall({
         url: `https://${centralUrl}/network-config/v1alpha1/devices?serial=${encodeURIComponent(serial)}`,
         token: centralToken,
       });
-      if (!res.ok) return null;
+      if (!res.ok) return { siteId: null, persona: null };
       const d = await res.json();
       const items = d.items || d.devices || (Array.isArray(d) ? d : []);
       const match = items.find(item =>
         String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
       );
-      const siteId = match?.siteId || match?.site_id || null;
-      if (siteId) console.log('[centralGetDeviceSiteId] found siteId:', siteId, 'for', serial);
-      return siteId ? String(siteId) : null;
+      const siteId  = match?.siteId  || match?.site_id  || null;
+      const persona = match?.persona || null;
+      console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
+      return { siteId: siteId ? String(siteId) : null, persona: persona || null };
     } catch (e) {
       console.warn('[centralGetDeviceSiteId] failed:', e.message);
-      return null;
+      return { siteId: null, persona: null };
     }
   },
 
@@ -1090,7 +1093,7 @@ const demoApi = {
     { id: '10003', name: 'Data Center 1',  city: 'Phoenix',   state: 'AZ' },
     { id: '10004', name: 'Remote Site',    city: 'Denver',    state: 'CO' },
   ]; },
-  async centralGetDeviceSiteId({ serial } = {}) { await delay(300); return (serial || '').startsWith('EXIST') ? '10001' : null; },
+  async centralGetDeviceSiteId({ serial } = {}) { await delay(300); return (serial || '').startsWith('EXIST') ? { siteId: '10001', persona: 'CAMPUS_AP' } : { siteId: null, persona: null }; },
   async centralAssignSite()    { await delay(800); return { success: true }; },
   async centralAssignFunction(){ await delay(600); return { success: true }; },
   async centralGetSystemInfo({ serial } = {}) {
@@ -1852,7 +1855,7 @@ const LocationScreen = ({ settings, api, onNext, initialId }) => {
                     : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
                   <p className="text-white font-medium text-sm">{loc.name}</p>
                   {loc.city && <p className="text-gray-500 text-xs mt-0.5">{[loc.city, loc.country].filter(Boolean).join(', ')}</p>}
-                  {selected?.id === loc.id && <p className="text-emerald-400 text-xs mt-1">✓ Selected</p>}
+                  {selected?.id === loc.id && <p className="text-emerald-400 text-xs mt-1">{initialId && String(initialId) === String(loc.id) ? '✓ Currently assigned' : '✓ Selected'}</p>}
                 </button>
               ))}
             </div>
@@ -1975,7 +1978,7 @@ const ContactScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
                     : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
                   <p className="text-white font-medium text-sm">{userName(user)}</p>
                   {userEmail(user) && <p className="text-gray-500 text-xs mt-0.5">{userEmail(user)}</p>}
-                  {selected?.id === user.id && <p className="text-emerald-400 text-xs mt-1">✓ Selected</p>}
+                  {selected?.id === user.id && <p className="text-emerald-400 text-xs mt-1">{initialId && String(initialId) === String(user.id) ? '✓ Currently assigned' : '✓ Selected'}</p>}
                 </button>
               ))}
             </div>
@@ -2342,6 +2345,15 @@ const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
   const allowed = deviceType ? (PERSONA_BY_DEVICE_TYPE[deviceType] || DEVICE_FUNCTIONS.map(f => f.id)) : DEVICE_FUNCTIONS.map(f => f.id);
   const filtered = DEVICE_FUNCTIONS.filter(fn => allowed.includes(fn.id));
   const [selected, setSelected] = useState(() => initialId ? (filtered.find(fn => fn.id === initialId) || null) : null);
+
+  // Reactive pre-population: background Central lookup may complete after mount
+  useEffect(() => {
+    if (initialId) {
+      const match = filtered.find(fn => fn.id === initialId);
+      if (match) setSelected(match);
+    }
+  }, [initialId]);
+
   return (
     <div className="p-5 space-y-4 step-enter">
       <div className="pt-2">
@@ -2360,7 +2372,7 @@ const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
                 <p className="text-white font-semibold text-sm">{fn.label}</p>
                 <p className="text-gray-500 text-xs mt-0.5">{fn.desc}</p>
               </div>
-              {selected?.id === fn.id && <span className="text-emerald-400">✓</span>}
+              {selected?.id === fn.id && <span className="text-emerald-400 text-xs">{initialId && initialId === fn.id ? '✓ Currently assigned' : '✓'}</span>}
             </div>
           </button>
         ))}
@@ -2847,7 +2859,7 @@ const App = () => {
             )}
             <ScanScreen settings={liveSettings}
               onScanned={(d, raw) => {
-                upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null, currentSiteId: null });
+                upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null, currentSiteId: null, currentFunctionId: null });
                 // Background lookups — fetch a fresh token first so lookups don't fail
                 // if liveSettings.token is stale at the moment the scan fires.
                 getGlToken()
@@ -2859,12 +2871,14 @@ const App = () => {
                       api.centralGetDeviceSiteId({ serial: d.serial, centralToken: token, centralUrl }),
                     ]);
                   })
-                  .then(([existing, siteId]) => {
-                    console.log('[background lookup] existing:', !!existing, '| siteId:', siteId);
+                  .then(([existing, centralInfo]) => {
+                    const { siteId, persona } = centralInfo || {};
+                    console.log('[background lookup] existing:', !!existing, '| siteId:', siteId, '| persona:', persona);
                     if (existing) {
                       const patch = {
                         currentTags:            existing.tags || {},
-                        currentContactId:       existing.contact?.id || null,
+                        // contact.workspaceUser.id for WORKSPACE-USER type; contact.id as fallback
+                        currentContactId:       existing.contact?.workspaceUser?.id || existing.contact?.id || null,
                         currentLocationId:      existing.location?.id || null,
                         // subscription is an array in the API response — use the normalised _subKey
                         currentSubscriptionKey: existing._subKey || null,
@@ -2873,7 +2887,12 @@ const App = () => {
                       console.log('[background lookup] upd patch:', JSON.stringify(patch));
                       upd(patch);
                     }
-                    if (siteId) upd({ currentSiteId: siteId });
+                    // Persona 'None' means no function is configured — treat as null
+                    const fnId = (persona && persona !== 'None') ? persona : null;
+                    if (siteId || fnId) upd({
+                      ...(siteId ? { currentSiteId:     siteId } : {}),
+                      ...(fnId   ? { currentFunctionId: fnId   } : {}),
+                    });
                   })
                   .catch(e => console.warn('[background lookup] failed:', e.message));
                 enterScreen('tags');
@@ -2972,7 +2991,7 @@ const App = () => {
 
         {screen === 'function' && (
           <FunctionScreen deviceType={summary.deviceType}
-            initialId={localStorage.getItem('aruba_last_function')}
+            initialId={summary.currentFunctionId || localStorage.getItem('aruba_last_function')}
             onSelect={fn => {
               localStorage.setItem('aruba_last_function', fn.id);
               upd({ deviceFunction: fn }); setScreen('hostname');
