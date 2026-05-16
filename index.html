@@ -2102,12 +2102,18 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
       {loading ? <Spinner /> : (
         <>
           {currentHostname && (
-            <div className="flex items-center gap-2 bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3">
-              <span className="text-gray-500 text-xs shrink-0">Current:</span>
-              <span className="text-white text-sm font-mono">{currentHostname}</span>
+            <div className="space-y-1">
+              <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider px-1">Current Hostname</p>
+              <div className="flex items-center gap-2 bg-white bg-opacity-3 border border-white border-opacity-5 rounded-xl px-4 py-3">
+                <span className="text-gray-500 text-sm font-mono">{currentHostname}</span>
+                <span className="text-gray-700 text-xs ml-auto">read-only</span>
+              </div>
             </div>
           )}
           <div className="space-y-1.5">
+            <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider px-1">
+              {currentHostname ? 'New Hostname' : 'Set Hostname'}
+            </p>
             <input
               value={hostname}
               onChange={e => setHostname(e.target.value)}
@@ -2309,8 +2315,8 @@ const SuccessScreen = ({ summary, onAnother }) => (
 // ── APP ────────────────────────────────────────────────────────────────────────
 const STEPS = ['scan','tags','location','contact','adding_gl','device_type','subscription','application','site','function','review'];
 // device_type is a fallback screen — give it the same progress value as subscription so the bar doesn't jump.
-const STEP_PROGRESS = { scan:0, tags:1, location:2, contact:3, adding_gl:4, device_type:5, subscription:5, application:6, site:7, function:8, review:9 };
-const TOTAL_STEPS = 9;
+const STEP_PROGRESS = { scan:0, tags:1, location:2, contact:3, adding_gl:4, device_type:5, subscription:5, application:6, site:7, function:8, hostname:9, review:10 };
+const TOTAL_STEPS = 10;
 
 const defaultSettings = () => ({
   glClientId: '', glClientSecret: '', workspaceId: '',
