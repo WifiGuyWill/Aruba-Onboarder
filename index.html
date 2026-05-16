@@ -755,7 +755,7 @@ const liveApi = {
 
   // Central: GET current system info (hostname). Silent failure — device may not be in Central yet.
   async centralGetSystemInfo({ serial, centralToken, centralUrl }) {
-    const url = `https://${centralUrl}/network-config/v1alpha1/system-info?serial=${encodeURIComponent(serial)}`;
+    const url = `https://${centralUrl}/network-config/v1alpha1/system-info?view-type=LOCAL&scope-id=${encodeURIComponent(serial)}`;
     try {
       const res = await proxyCall({ url, token: centralToken });
       console.log('[centralGetSystemInfo] →', res.status);
@@ -774,7 +774,7 @@ const liveApi = {
   // The 'hostname' field cannot be set when 'hostname-alias' is present, so we try
   // clearing the alias first, then fall back to setting it directly.
   async centralSetHostname({ serial, hostname, hostnameExists, centralToken, centralUrl }) {
-    const url = `https://${centralUrl}/network-config/v1alpha1/system-info?serial=${encodeURIComponent(serial)}`;
+    const url = `https://${centralUrl}/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(serial)}`;
     const method = hostnameExists ? 'PATCH' : 'POST';
     const attempts = [
       { label: 'hostname',              body: { hostname } },
