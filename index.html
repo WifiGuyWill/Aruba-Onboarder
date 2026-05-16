@@ -534,9 +534,25 @@ const liveApi = {
 
   // GreenLake: create location
   async glCreateLocation({ name, address, token }) {
+    // Extract user email from the JWT sub claim — used for the required Contacts array.
+    let userEmail = '';
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      userEmail = payload.sub || payload.email || '';
+    } catch (e) { /* ignore — contacts will be omitted if unparseable */ }
+
     const body = {
       name,
-      addresses: [{ streetaddress: address.street, city: address.city, state: address.state, postalCode: address.zip, country: address.country }],
+      addresses: [{
+        type:          'SHIPPING',           // required by API
+        streetaddress: address.street  || '',
+        city:          address.city    || '',
+        state:         address.state   || '',
+        postalCode:    address.zip     || '',
+        country:       address.country || '', // must be ISO 3166-1 alpha-2 (e.g. "US")
+      }],
+      // Contacts array is required — use the authenticated user's email from the JWT
+      ...(userEmail ? { contacts: [{ contactType: 'PRIMARY', email: userEmail }] } : {}),
     };
     const res = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body });
     if (!res.ok) throw new Error(`Create location error ${res.status}: ${await res.text()}`);
@@ -1877,8 +1893,9 @@ const LocationScreen = ({ settings, api, onNext, initialId }) => {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <TextInput label="Postal Code" value={newLoc.zip} onChange={setNL('zip')} placeholder="EC1A 1BB" />
-            <TextInput label="Country" value={newLoc.country} onChange={setNL('country')} placeholder="GB" />
+            <TextInput label="Country (ISO code)" value={newLoc.country} onChange={v => setNL('country')(v.toUpperCase().slice(0, 2))} placeholder="US" />
           </div>
+          <p className="text-gray-600 text-xs -mt-1">Country must be a 2-letter ISO code (US, GB, AU…)</p>
           {createErr && <p className="text-red-400 text-xs">{createErr}</p>}
           <Btn onClick={handleCreate} disabled={!newLoc.name.trim() || creating}>
             {creating ? 'Creating…' : 'Create Location'}
