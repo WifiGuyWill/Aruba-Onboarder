@@ -770,13 +770,27 @@ const liveApi = {
   },
 
   // Central: POST (create) or PATCH (update) hostname via system-info endpoint.
+  // Tries multiple body formats — API docs say 'hostname' but GET returns 'hostname-alias'.
+  // The 'hostname' field cannot be set when 'hostname-alias' is present, so we try
+  // clearing the alias first, then fall back to setting it directly.
   async centralSetHostname({ serial, hostname, hostnameExists, centralToken, centralUrl }) {
     const url = `https://${centralUrl}/network-config/v1alpha1/system-info?serial=${encodeURIComponent(serial)}`;
     const method = hostnameExists ? 'PATCH' : 'POST';
-    console.log(`[centralSetHostname] ${method} hostname-alias="${hostname}" serial=${serial}`);
-    const res = await proxyCall({ url, method, token: centralToken, body: { 'hostname-alias': hostname } });
-    if (!res.ok) throw new Error(`Hostname ${method} error ${res.status}: ${await res.text()}`);
-    return res.json().catch(() => ({ success: true }));
+    const attempts = [
+      { label: 'hostname',              body: { hostname } },
+      { label: 'hostname-alias',        body: { 'hostname-alias': hostname } },
+      { label: 'clear-alias+hostname',  body: { 'hostname-alias': '', hostname } },
+    ];
+    const errors = [];
+    for (const attempt of attempts) {
+      console.log(`[centralSetHostname] ${method} [${attempt.label}] serial=${serial}`);
+      const res = await proxyCall({ url, method, token: centralToken, body: attempt.body });
+      const txt = !res.ok ? await res.clone().text() : '';
+      console.log(`[centralSetHostname] ${attempt.label} → ${res.status}`, txt ? txt.slice(0, 300) : 'OK');
+      if (res.ok) return res.json().catch(() => ({ success: true }));
+      errors.push(`[${attempt.label}] ${res.status}: ${txt.slice(0, 200)}`);
+    }
+    throw new Error(`Hostname assignment failed:\n${errors.join('\n')}`);
   },
 };
 
