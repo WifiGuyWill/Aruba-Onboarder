@@ -2471,6 +2471,11 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
         <p className="text-gray-400 text-sm">Set a name for this device in Aruba Central</p>
       </div>
 
+      <div className="flex items-start gap-3 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-2xl px-4 py-3">
+        <span className="text-amber-400 text-lg shrink-0">⚠️</span>
+        <p className="text-amber-300 text-xs leading-relaxed">Hostname assignment requires the device to already be provisioned in New Central with a site assigned. If this device was just added, set the hostname manually in Aruba Central for now — full API support is coming soon.</p>
+      </div>
+
       {loading ? <Spinner /> : (
         <>
           {currentHostname && (
