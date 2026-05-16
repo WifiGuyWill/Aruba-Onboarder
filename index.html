@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516o -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516y -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -250,12 +250,14 @@ const liveApi = {
     const res = await proxyCall({ url: addUrl, method: 'POST', token, body });
     if (res.status === 202) {
       const loc = res.headers.get('location');
+      let pollFailed = false;
       if (loc) {
         try {
           await pollAsync(`${GL_BASE}${loc}`, token);
         } catch (pollErr) {
           // Async add failed — most common cause is device already exists in GreenLake.
           // Don't throw yet; fall through to the lookup below and use the existing record.
+          pollFailed = true;
           console.warn('[glAddDevice] async op failed — checking if device already exists:', pollErr.message);
         }
       }
@@ -268,7 +270,12 @@ const liveApi = {
       const d = await devRes.json();
       const device = (d.items || [])[0];
       if (!device) throw new Error(`Device add failed and device not found in GreenLake: ${serial}`);
-      console.log('[glAddDevice] using device:', device.id, '— assignedState:', device.assignedState, '| model:', device.model, '| partNumber:', device.partNumber);
+      const subArr = Array.isArray(device.subscription) ? device.subscription : (device.subscription ? [device.subscription] : []);
+      device._subKey = subArr[0]?.key || null;
+      device._subId  = subArr[0]?.id  || null;
+      console.log('[glAddDevice] using device:', device.id, '— assignedState:', device.assignedState, '| subscription:', device._subKey, '| application:', device.application?.id);
+      // If the async poll failed the device was already in GreenLake — mark it.
+      const wasExisting = pollFailed;
       // Explicitly PATCH location — the initial POST body may not link it reliably.
       if (locationId && device.id) {
         const locPatch = await proxyCall({
@@ -283,7 +290,7 @@ const liveApi = {
           console.warn('[glAddDevice] location PATCH failed:', locPatch.status, await locPatch.text().catch(() => ''));
         }
       }
-      return device;
+      return wasExisting ? { ...device, foundExisting: true } : device;
     }
     if (!res.ok) {
       const errBody = await res.text();
@@ -447,6 +454,57 @@ const liveApi = {
     return tags;
   },
 
+  // GreenLake: look up a single device by serial — returns null if not found.
+  // Called right after scan to pre-populate tags, contact, subscription, and application
+  // screens before the user reaches them.
+  // Two-step: list GET by serial to find the ID, then single-item GET by ID which
+  // returns full DeviceDetail including contact and subscription (list endpoint omits them).
+  async glLookupDevice({ serial, token }) {
+    try {
+      const res = await proxyCall({
+        url: `${GL_BASE}/devices/v1/devices?filter=serialNumber eq '${serial}'`,
+        token,
+      });
+      if (!res.ok) return null;
+      const d = await res.json();
+      const device = (d.items || [])[0];
+      if (!device) return null;
+
+      // Step 2: fetch full detail by device ID — list endpoint may omit contact + subscription
+      try {
+        const detailRes = await proxyCall({
+          url: `${GL_BASE}/devices/v1/devices/${encodeURIComponent(device.id)}`,
+          token,
+        });
+        console.log('[glLookupDevice] detail GET →', detailRes.status);
+        if (detailRes.ok) {
+          const detail = await detailRes.json();
+          console.log('[glLookupDevice] detail raw: sub=', JSON.stringify(detail.subscription), '| contact=', JSON.stringify(detail.contact), '| location=', JSON.stringify(detail.location));
+          // Only overwrite fields that are null/undefined in the list response —
+          // the detail GET sometimes returns null for fields the list GET had populated.
+          Object.keys(detail).forEach(k => {
+            if (device[k] === null || device[k] === undefined) device[k] = detail[k];
+          });
+        }
+      } catch (e2) {
+        console.warn('[glLookupDevice] detail GET failed:', e2.message);
+      }
+
+      // subscription is returned as an array — extract the first entry's key
+      const subArr = Array.isArray(device.subscription) ? device.subscription : (device.subscription ? [device.subscription] : []);
+      const subKey = subArr[0]?.key || null;
+      const contactId = device.contact?.workspaceUser?.id || device.contact?.id || null;
+      console.log('[glLookupDevice] found:', device.id, '| tags:', JSON.stringify(device.tags), '| contactId:', contactId, '| location:', device.location?.id, '| subscription:', subKey, '| application:', device.application?.id);
+      // Normalise subscription to a plain object for downstream code
+      device._subKey = subKey;
+      device._subId  = subArr[0]?.id  || null;
+      return device;
+    } catch (e) {
+      console.warn('[glLookupDevice] lookup failed:', e.message);
+      return null;
+    }
+  },
+
   // GreenLake: list locations
   async glGetLocations({ token }) {
     const res = await proxyCall({ url: `${GL_BASE}/locations/v1/locations?limit=100`, token });
@@ -476,13 +534,63 @@ const liveApi = {
 
   // GreenLake: create location
   async glCreateLocation({ name, address, token }) {
-    const body = {
-      name,
-      addresses: [{ streetaddress: address.street, city: address.city, state: address.state, postalCode: address.zip, country: address.country }],
+    // ISO 3166-1 alpha-2 → full country name as expected by the GL locations API
+    // (GET returns full names like "United States"; POST ValidateCountry rejects codes)
+    const COUNTRY_NAMES = {
+      US:'United States',GB:'United Kingdom',CA:'Canada',AU:'Australia',DE:'Germany',
+      FR:'France',NL:'Netherlands',SE:'Sweden',NO:'Norway',DK:'Denmark',FI:'Finland',
+      CH:'Switzerland',AT:'Austria',BE:'Belgium',IE:'Ireland',ES:'Spain',IT:'Italy',
+      PT:'Portugal',PL:'Poland',CZ:'Czechia',HU:'Hungary',RO:'Romania',BG:'Bulgaria',
+      HR:'Croatia',SK:'Slovakia',SI:'Slovenia',LT:'Lithuania',LV:'Latvia',EE:'Estonia',
+      JP:'Japan',CN:'China',KR:'South Korea',IN:'India',SG:'Singapore',HK:'Hong Kong',
+      TW:'Taiwan',MY:'Malaysia',TH:'Thailand',PH:'Philippines',ID:'Indonesia',VN:'Vietnam',
+      NZ:'New Zealand',ZA:'South Africa',BR:'Brazil',MX:'Mexico',AR:'Argentina',CL:'Chile',
+      CO:'Colombia',PE:'Peru',AE:'United Arab Emirates',SA:'Saudi Arabia',IL:'Israel',
+      TR:'Turkey',EG:'Egypt',NG:'Nigeria',KE:'Kenya',GH:'Ghana',PK:'Pakistan',BD:'Bangladesh',
     };
-    const res = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body });
-    if (!res.ok) throw new Error(`Create location error ${res.status}: ${await res.text()}`);
-    return res.json();
+    // Accept either ISO code ("US") or full name ("United States") — normalise to full name
+    const rawCountry = (address.country || '').trim();
+    const country = COUNTRY_NAMES[rawCountry.toUpperCase()] || rawCountry;
+
+    // Decode JWT to get user email + derive a display name for the required Contacts array
+    let userEmail = '', userName = '';
+    try {
+      const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      userEmail = payload.sub || payload.email || '';
+      // Try first/last name claims; fall back to the email local-part
+      const first = payload.given_name || payload.firstName || '';
+      const last  = payload.family_name || payload.lastName  || '';
+      userName = (first + ' ' + last).trim() || (userEmail.split('@')[0] || 'User').replace(/[._-]/g, ' ');
+    } catch (e) { /* ignore */ }
+
+    const addressObj = {
+      type:          'SHIPPING',
+      streetaddress: address.street || '',
+      city:          address.city   || '',
+      state:         address.state  || '',
+      postalCode:    address.zip    || '',
+      country,
+    };
+
+    // Attempt 1: without contacts — workspace may already have a primary contact and
+    // reject any additional contact entry (409 conflict). Skip contacts first.
+    const bodyNoContacts = { name, addresses: [addressObj] };
+    console.log('[glCreateLocation] attempt 1 (no contacts):', JSON.stringify(bodyNoContacts));
+    const res1 = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body: bodyNoContacts });
+    if (res1.ok) return res1.json();
+    const err1 = await res1.text();
+    console.log('[glCreateLocation] attempt 1 failed:', res1.status, err1.slice(0, 200));
+
+    // Attempt 2: with contacts — some workspaces require the contacts field
+    if (userEmail) {
+      const bodyWithContacts = { name, addresses: [addressObj], contacts: [{ type: 'TECHNICAL', name: userName || userEmail, email: userEmail }] };
+      console.log('[glCreateLocation] attempt 2 (with contacts):', JSON.stringify(bodyWithContacts));
+      const res2 = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body: bodyWithContacts });
+      if (res2.ok) return res2.json();
+      const err2 = await res2.text();
+      throw new Error(`Create location error ${res2.status}: ${err2}`);
+    }
+    throw new Error(`Create location error ${res1.status}: ${err1}`);
   },
 
   // GreenLake: fetch provisioned services for this workspace.
@@ -564,6 +672,32 @@ const liveApi = {
       if (hasApp) regions.push({ id: region.id, name: region.regionName || region.id });
     }
     return regions;
+  },
+
+  // GreenLake: PATCH — apply tags and contact to a device.
+  // Uses the v2beta1 PATCH endpoint which supports both fields.
+  // Tags: flat key/value object — null value deletes a tag.
+  // Contact type WORKSPACE-USER requires the user's GreenLake identity ID.
+  async glPatchAttributes({ deviceId, tags, contact, token }) {
+    const body = {};
+    if (tags && Object.keys(tags).length > 0) body.tags = tags;
+    if (contact?.id) {
+      body.contact = { type: 'WORKSPACE-USER', workspaceUser: { id: contact.id } };
+    }
+    if (Object.keys(body).length === 0) return { success: true }; // nothing to send
+    const res = await proxyCall({
+      url: `${GL_BASE}/devices/v2beta1/devices?id=${encodeURIComponent(deviceId)}`,
+      method: 'PATCH',
+      token,
+      body,
+    });
+    if (res.status === 202) {
+      const loc = res.headers.get('location');
+      if (loc) await pollAsync(`${GL_BASE}${loc}`, token);
+      return { success: true };
+    }
+    if (!res.ok) throw new Error(`Tags/contact update error ${res.status}: ${await res.text()}`);
+    return res.json();
   },
 
   // GreenLake: PATCH — assign subscription (async)
@@ -656,6 +790,33 @@ const liveApi = {
     }
 
     throw new Error(`Sites API not available on cluster: ${centralUrl}`);
+  },
+
+  // Lightweight Central lookup: returns the siteId and persona currently assigned to a device.
+  // Uses the config-devices list which already contains both fields per device.
+  // Called as a background task right after scan so SiteScreen + FunctionScreen can be pre-populated.
+  // Returns { siteId: string|null, persona: string|null }
+  async centralGetDeviceSiteId({ serial, centralToken, centralUrl }) {
+    if (!centralToken || !centralUrl || !serial) return { siteId: null, persona: null };
+    try {
+      const res = await proxyCall({
+        url: `https://${centralUrl}/network-config/v1alpha1/devices?serial=${encodeURIComponent(serial)}`,
+        token: centralToken,
+      });
+      if (!res.ok) return { siteId: null, persona: null };
+      const d = await res.json();
+      const items = d.items || d.devices || (Array.isArray(d) ? d : []);
+      const match = items.find(item =>
+        String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
+      );
+      const siteId  = match?.siteId  || match?.site_id  || null;
+      const persona = match?.persona || null;
+      console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
+      return { siteId: siteId ? String(siteId) : null, persona: persona || null };
+    } catch (e) {
+      console.warn('[centralGetDeviceSiteId] failed:', e.message);
+      return { siteId: null, persona: null };
+    }
   },
 
   // Central: assign a device to a site.
@@ -959,6 +1120,21 @@ const demoApi = {
     { id: 'us-west', name: 'US West' },
     { id: 'eu-west', name: 'EU West' },
   ]; },
+  async glLookupDevice({ serial } = {}) {
+    await delay(400);
+    if ((serial || '').startsWith('EXIST')) return {
+      id: 'f3a2c109-8b47-4e1d-a532-9d6e2b84f701',
+      tags: { floor: '2', role: 'AP' },
+      contact: { id: 'usr-1', firstName: 'Will', lastName: 'Smith', email: 'will.smith@hpe.com' },
+      // API returns subscription as array; _subKey is the normalised key set by the real glLookupDevice
+      subscription: [{ key: 'EWCCWPTSMBVPMEFS', id: 'sub-ap-adv' }],
+      _subKey: 'EWCCWPTSMBVPMEFS',
+      _subId:  'sub-ap-adv',
+      application: { id: 'app-central-prod' },
+    };
+    return null;
+  },
+  async glPatchAttributes()    { await delay(600); return { success: true }; },
   async glAssignSubscription() { await delay(900); return { success: true }; },
   async glAssignApplication()  { await delay(700); return { success: true }; },
   async centralGetSites()      { await delay(750); return [
@@ -967,6 +1143,7 @@ const demoApi = {
     { id: '10003', name: 'Data Center 1',  city: 'Phoenix',   state: 'AZ' },
     { id: '10004', name: 'Remote Site',    city: 'Denver',    state: 'CO' },
   ]; },
+  async centralGetDeviceSiteId({ serial } = {}) { await delay(300); return (serial || '').startsWith('EXIST') ? { siteId: '10001', persona: 'CAMPUS_AP' } : { siteId: null, persona: null }; },
   async centralAssignSite()    { await delay(800); return { success: true }; },
   async centralAssignFunction(){ await delay(600); return { success: true }; },
   async centralGetSystemInfo({ serial } = {}) {
@@ -1551,6 +1728,14 @@ const TagsScreen = ({ settings, api, onNext, initialTags }) => {
   const [customKey, setCustomKey] = useState('');
   const [customVal, setCustomVal] = useState('');
 
+  // Background GL lookup may complete after mount — always apply the device's current
+  // tags when they arrive (authoritative over localStorage fallback).
+  useEffect(() => {
+    if (initialTags && typeof initialTags === 'object' && Object.keys(initialTags).length > 0) {
+      setSelected(initialTags);
+    }
+  }, [initialTags]);
+
   useEffect(() => {
     api.glGetTags(settings)
       .then(tags => { setExistingTags(tags); setLoading(false); })
@@ -1634,7 +1819,7 @@ const TagsScreen = ({ settings, api, onNext, initialTags }) => {
 
       <div className="space-y-2.5 pt-1">
         <Btn onClick={() => onNext(selected)} disabled={selectedCount === 0 || loading}>
-          {`Add ${selectedCount} Tag${selectedCount !== 1 ? 's' : ''} →`}
+          {`Update Tags (${selectedCount}) →`}
         </Btn>
         <Btn variant="secondary" onClick={() => onNext({})}>Skip for Now</Btn>
       </div>
@@ -1657,6 +1842,12 @@ const LocationScreen = ({ settings, api, onNext, initialId }) => {
   useEffect(() => {
     api.glGetLocations(settings)
       .then(locs => {
+        // Currently assigned location sorts first
+        if (initialId) locs.sort((a, b) => {
+          if (String(a.id) === String(initialId)) return -1;
+          if (String(b.id) === String(initialId)) return 1;
+          return 0;
+        });
         setLocations(locs);
         if (initialId) {
           const match = locs.find(l => String(l.id) === String(initialId));
@@ -1666,6 +1857,15 @@ const LocationScreen = ({ settings, api, onNext, initialId }) => {
       })
       .catch(() => setLoading(false));
   }, []);
+
+  // Background GL lookup may complete after locations have loaded — always apply
+  // the device's current location when it arrives (authoritative over localStorage).
+  useEffect(() => {
+    if (initialId && locations.length > 0) {
+      const match = locations.find(l => String(l.id) === String(initialId));
+      if (match) setSelected(match);
+    }
+  }, [initialId, locations]);
 
   const filtered = locations.filter(l => (l.name || '').toLowerCase().includes(search.toLowerCase()));
 
@@ -1688,52 +1888,23 @@ const LocationScreen = ({ settings, api, onNext, initialId }) => {
         <p className="text-gray-400 text-sm">Associate a GreenLake location with this device</p>
       </div>
 
-      <div className="flex bg-white bg-opacity-5 rounded-xl p-1 gap-1">
-        {[['list','📋  Pick Existing'],['create','➕  Create New']].map(([m, lbl]) => (
-          <button key={m} onClick={() => setMode(m)}
-            className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${mode === m ? 'bg-emerald-500 text-white' : 'text-gray-400'}`}>
-            {lbl}
-          </button>
-        ))}
-      </div>
-
-      {mode === 'list' ? (
-        <>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search locations…"
-            className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
-          {loading ? <Spinner /> : (
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {filtered.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No locations found</p>}
-              {filtered.map(loc => (
-                <button key={loc.id} onClick={() => setSelected(s => s?.id === loc.id ? null : loc)}
-                  className={`w-full text-left p-4 rounded-2xl border transition-all ${
-                    selected?.id === loc.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
-                    : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
-                  <p className="text-white font-medium text-sm">{loc.name}</p>
-                  {loc.city && <p className="text-gray-500 text-xs mt-0.5">{[loc.city, loc.country].filter(Boolean).join(', ')}</p>}
-                  {selected?.id === loc.id && <p className="text-emerald-400 text-xs mt-1">✓ Selected</p>}
-                </button>
-              ))}
-            </div>
-          )}
-        </>
-      ) : (
-        <Card className="space-y-3">
-          <TextInput label="Location Name" value={newLoc.name} onChange={setNL('name')} placeholder="e.g. London Office – Floor 3" />
-          <TextInput label="Street Address" value={newLoc.street} onChange={setNL('street')} placeholder="123 Main St" />
-          <div className="grid grid-cols-2 gap-3">
-            <TextInput label="City" value={newLoc.city} onChange={setNL('city')} placeholder="London" />
-            <TextInput label="State / Region" value={newLoc.state} onChange={setNL('state')} placeholder="ENG" />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <TextInput label="Postal Code" value={newLoc.zip} onChange={setNL('zip')} placeholder="EC1A 1BB" />
-            <TextInput label="Country" value={newLoc.country} onChange={setNL('country')} placeholder="GB" />
-          </div>
-          {createErr && <p className="text-red-400 text-xs">{createErr}</p>}
-          <Btn onClick={handleCreate} disabled={!newLoc.name.trim() || creating}>
-            {creating ? 'Creating…' : 'Create Location'}
-          </Btn>
-        </Card>
+      {/* Tab switcher + create form hidden until API is resolved — code preserved below */}
+      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search locations…"
+        className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
+      {loading ? <Spinner /> : (
+        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+          {filtered.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No locations found</p>}
+          {filtered.map(loc => (
+            <button key={loc.id} onClick={() => setSelected(s => s?.id === loc.id ? null : loc)}
+              className={`w-full text-left p-4 rounded-2xl border transition-all ${
+                selected?.id === loc.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+                : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
+              <p className="text-white font-medium text-sm">{loc.name}</p>
+              {loc.city && <p className="text-gray-500 text-xs mt-0.5">{[loc.city, loc.country].filter(Boolean).join(', ')}</p>}
+              {selected?.id === loc.id && <p className="text-emerald-400 text-xs mt-1">{initialId && String(initialId) === String(loc.id) ? '✓ Currently assigned' : '✓ Selected'}</p>}
+            </button>
+          ))}
+        </div>
       )}
 
       <div className="space-y-2.5 pt-1">
@@ -1778,10 +1949,26 @@ const ContactScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
       .catch(() => setLoading(false));
   }, []);
 
-  const filtered = users.filter(u => {
-    const q = search.toLowerCase();
-    return userName(u).toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q);
-  });
+  // Background GL lookup may complete after users have loaded — always apply the
+  // device's current contact when it arrives (authoritative over localStorage fallback).
+  useEffect(() => {
+    if (initialId && users.length > 0) {
+      const match = users.find(u => String(u.id) === String(initialId));
+      if (match) setSelected(match);
+    }
+  }, [initialId, users]);
+
+  const filtered = users
+    .filter(u => {
+      const q = search.toLowerCase();
+      return userName(u).toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q);
+    })
+    // Currently assigned contact appears first
+    .sort((a, b) => {
+      if (initialId && String(a.id) === String(initialId)) return -1;
+      if (initialId && String(b.id) === String(initialId)) return 1;
+      return 0;
+    });
 
   const handleCreate = async () => {
     if (!newUser.email.trim()) return;
@@ -1802,47 +1989,23 @@ const ContactScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
         <p className="text-gray-400 text-sm">Delivery or service contact for this device</p>
       </div>
 
-      <div className="flex bg-white bg-opacity-5 rounded-xl p-1 gap-1">
-        {[['list','👤  Pick Existing'],['create','➕  Add New']].map(([m, lbl]) => (
-          <button key={m} onClick={() => setMode(m)}
-            className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${mode === m ? 'bg-emerald-500 text-white' : 'text-gray-400'}`}>
-            {lbl}
-          </button>
-        ))}
-      </div>
-
-      {mode === 'list' ? (
-        <>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search contacts…"
-            className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
-          {loading ? <Spinner /> : (
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {filtered.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No contacts found</p>}
-              {filtered.map(user => (
-                <button key={user.id} onClick={() => setSelected(s => s?.id === user.id ? null : user)}
-                  className={`w-full text-left p-4 rounded-2xl border transition-all ${
-                    selected?.id === user.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
-                    : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
-                  <p className="text-white font-medium text-sm">{userName(user)}</p>
-                  {userEmail(user) && <p className="text-gray-500 text-xs mt-0.5">{userEmail(user)}</p>}
-                  {selected?.id === user.id && <p className="text-emerald-400 text-xs mt-1">✓ Selected</p>}
-                </button>
-              ))}
-            </div>
-          )}
-        </>
-      ) : (
-        <Card className="space-y-3">
-          <div className="grid grid-cols-2 gap-3">
-            <TextInput label="First Name" value={newUser.firstName} onChange={setNU('firstName')} placeholder="Alice" />
-            <TextInput label="Last Name"  value={newUser.lastName}  onChange={setNU('lastName')}  placeholder="Smith" />
-          </div>
-          <TextInput label="Email" value={newUser.email} onChange={setNU('email')} placeholder="alice@example.com" />
-          {createErr && <p className="text-red-400 text-xs">{createErr}</p>}
-          <Btn onClick={handleCreate} disabled={!newUser.email.trim() || creating}>
-            {creating ? 'Adding…' : 'Add Contact'}
-          </Btn>
-        </Card>
+      {/* Tab switcher + add-new form hidden until API is resolved — code preserved above */}
+      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search contacts…"
+        className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
+      {loading ? <Spinner /> : (
+        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+          {filtered.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No contacts found</p>}
+          {filtered.map(user => (
+            <button key={user.id} onClick={() => setSelected(s => s?.id === user.id ? null : user)}
+              className={`w-full text-left p-4 rounded-2xl border transition-all ${
+                selected?.id === user.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+                : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
+              <p className="text-white font-medium text-sm">{userName(user)}</p>
+              {userEmail(user) && <p className="text-gray-500 text-xs mt-0.5">{userEmail(user)}</p>}
+              {selected?.id === user.id && <p className="text-emerald-400 text-xs mt-1">{initialId && String(initialId) === String(user.id) ? '✓ Currently assigned' : '✓ Selected'}</p>}
+            </button>
+          ))}
+        </div>
       )}
 
       <div className="space-y-2.5 pt-1">
@@ -1856,6 +2019,30 @@ const ContactScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
 };
 
 // ── SCREEN: ADDING TO GREENLAKE (with async polling UI) ───────────────────────
+// Brief interstitial shown right after scan — does a quick GreenLake lookup to pre-populate
+// tags, contact, subscription, and application screens for devices already in the system.
+// Transitions automatically to the tags screen once the lookup completes.
+const LookupScreen = ({ serial, settings, api, onDone }) => {
+  useEffect(() => {
+    api.glLookupDevice({ serial, ...settings })
+      .then(existing => onDone(existing))
+      .catch(() => onDone(null));
+  }, []);
+
+  return (
+    <div className="p-5 step-enter">
+      <div className="pt-2 mb-8">
+        <h2 className="text-white font-bold text-xl">Checking GreenLake…</h2>
+        <p className="text-gray-400 text-sm font-mono">{serial}</p>
+      </div>
+      <div className="flex flex-col items-center py-10 space-y-4">
+        <Spinner size={48} />
+        <p className="text-gray-500 text-sm">Looking up device…</p>
+      </div>
+    </div>
+  );
+};
+
 const AddingScreen = ({ device, settings, api, onSuccess, onBack }) => {
   const [status, setStatus] = useState('loading');
   const [msg, setMsg] = useState('Registering device in HPE GreenLake…');
@@ -1927,6 +2114,12 @@ const SubscriptionScreen = ({ settings, api, onSelect, onSkip, deviceType, initi
     api.glGetSubscriptions(settings)
       .then(d => {
         const filtered = filterSubscriptions(d, deviceType);
+        // Currently assigned subscription appears first
+        if (initialKey) filtered.sort((a, b) => {
+          if (a.key === initialKey) return -1;
+          if (b.key === initialKey) return 1;
+          return 0;
+        });
         setSubs(filtered);
         if (initialKey) {
           const match = filtered.find(s => s.key === initialKey);
@@ -2019,7 +2212,7 @@ const REGION_LABELS = {
 const regionLabel = id => REGION_LABELS[id] || id;
 
 // ── SCREEN: SERVICE (was Application) ────────────────────────────────────────
-const ApplicationScreen = ({ settings, api, onSelect, deviceType }) => {
+const ApplicationScreen = ({ settings, api, onSelect, deviceType, initialId }) => {
   const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
@@ -2035,11 +2228,19 @@ const ApplicationScreen = ({ settings, api, onSelect, deviceType }) => {
           if (isUxi) return name.includes('uxi');
           return name.includes('central') || name.includes('aruba networking');
         });
+        // Currently assigned application sorts first
+        if (initialId) filtered.sort((a, b) => {
+          if (String(a.id) === String(initialId)) return -1;
+          if (String(b.id) === String(initialId)) return 1;
+          return 0;
+        });
         setApps(filtered);
         setLoading(false);
-        // Auto-select if only one option or the expected app is present
-        const match = filtered.find(a => (a.name || '').toLowerCase().includes(isUxi ? 'uxi' : 'central'));
-        const auto = match || (filtered.length === 1 ? filtered[0] : null);
+        // Pre-select by current application ID if provided (existing device),
+        // otherwise auto-select the best name match or single option
+        const byId   = initialId ? filtered.find(a => String(a.id) === String(initialId)) : null;
+        const byName = filtered.find(a => (a.name || '').toLowerCase().includes(isUxi ? 'uxi' : 'central'));
+        const auto   = byId || byName || (filtered.length === 1 ? filtered[0] : null);
         if (auto) setSelected(auto);
       })
       .catch(e => { setError(e.message); setLoading(false); });
@@ -2073,7 +2274,11 @@ const ApplicationScreen = ({ settings, api, onSelect, deviceType }) => {
                     <p className="text-gray-500 text-xs mt-0.5">📍 {app.regionName || regionLabel(app.region)}</p>
                   )}
                 </div>
-                {selected?.id === app.id && <span className="text-emerald-400 shrink-0">✓</span>}
+                {selected?.id === app.id && (
+                  <span className="text-emerald-400 text-xs shrink-0">
+                    {initialId && initialId === app.id ? '✓ Currently assigned' : '✓ Selected'}
+                  </span>
+                )}
               </div>
             </button>
           ))}
@@ -2098,6 +2303,12 @@ const SiteScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
   useEffect(() => {
     api.centralGetSites(settings)
       .then(d => {
+        // Currently assigned site sorts first
+        if (initialId) d.sort((a, b) => {
+          if (String(a.id) === String(initialId)) return -1;
+          if (String(b.id) === String(initialId)) return 1;
+          return 0;
+        });
         setSites(d);
         if (initialId) {
           const match = d.find(s => String(s.id) === String(initialId));
@@ -2107,6 +2318,14 @@ const SiteScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
       })
       .catch(e => { setError(e.message); setLoading(false); });
   }, []);
+
+  // Reactive pre-population: fires when initialId arrives late (background Central lookup)
+  useEffect(() => {
+    if (initialId && sites.length > 0) {
+      const match = sites.find(s => String(s.id) === String(initialId));
+      if (match) setSelected(match);
+    }
+  }, [initialId, sites]);
 
   const filtered = sites.filter(s =>
     (s.name || '').toLowerCase().includes(search.toLowerCase()) ||
@@ -2135,7 +2354,7 @@ const SiteScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
               : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
             <p className="text-white font-medium text-sm">{site.name}</p>
             {(site.city || site.state) && <p className="text-gray-500 text-xs mt-0.5">{[site.city, site.state].filter(Boolean).join(', ')}</p>}
-            {selected?.id === site.id && <p className="text-emerald-400 text-xs mt-1.5">✓ Selected</p>}
+            {selected?.id === site.id && <p className="text-emerald-400 text-xs mt-1.5">{initialId && String(initialId) === String(site.id) ? '✓ Currently assigned' : '✓ Selected'}</p>}
           </button>
         ))}
       </div>
@@ -2152,8 +2371,24 @@ const SiteScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
 // ── SCREEN: DEVICE FUNCTION ───────────────────────────────────────────────────
 const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
   const allowed = deviceType ? (PERSONA_BY_DEVICE_TYPE[deviceType] || DEVICE_FUNCTIONS.map(f => f.id)) : DEVICE_FUNCTIONS.map(f => f.id);
-  const filtered = DEVICE_FUNCTIONS.filter(fn => allowed.includes(fn.id));
+  const filtered = DEVICE_FUNCTIONS
+    .filter(fn => allowed.includes(fn.id))
+    // Currently assigned function sorts first
+    .sort((a, b) => {
+      if (initialId && a.id === initialId) return -1;
+      if (initialId && b.id === initialId) return 1;
+      return 0;
+    });
   const [selected, setSelected] = useState(() => initialId ? (filtered.find(fn => fn.id === initialId) || null) : null);
+
+  // Reactive pre-population: background Central lookup may complete after mount
+  useEffect(() => {
+    if (initialId) {
+      const match = filtered.find(fn => fn.id === initialId);
+      if (match) setSelected(match);
+    }
+  }, [initialId]);
+
   return (
     <div className="p-5 space-y-4 step-enter">
       <div className="pt-2">
@@ -2172,7 +2407,7 @@ const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
                 <p className="text-white font-semibold text-sm">{fn.label}</p>
                 <p className="text-gray-500 text-xs mt-0.5">{fn.desc}</p>
               </div>
-              {selected?.id === fn.id && <span className="text-emerald-400">✓</span>}
+              {selected?.id === fn.id && <span className="text-emerald-400 text-xs">{initialId && initialId === fn.id ? '✓ Currently assigned' : '✓'}</span>}
             </div>
           </button>
         ))}
@@ -2236,6 +2471,11 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
         <p className="text-gray-400 text-sm">Set a name for this device in Aruba Central</p>
       </div>
 
+      <div className="flex items-start gap-3 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-2xl px-4 py-3">
+        <span className="text-amber-400 text-lg shrink-0">⚠️</span>
+        <p className="text-amber-300 text-xs leading-relaxed">Hostname assignment requires the device to already be provisioned in New Central with a site assigned. If this device was just added, set the hostname manually in Aruba Central for now — full API support is coming soon.</p>
+      </div>
+
       {loading ? <Spinner /> : (
         <>
           {currentHostname && (
@@ -2285,7 +2525,16 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
 const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
   const isUxi = summary.deviceType === 'UXI';
   const [submitting, setSubmitting] = useState(false);
+  // Compute tag patch: additions/changes from summary.tags PLUS null-deletions for any
+  // tags that were on the device (currentTags) but the user removed during this session.
+  const tagPatch = { ...(summary.tags || {}) };
+  Object.keys(summary.currentTags || {}).forEach(k => {
+    if (tagPatch[k] === undefined) tagPatch[k] = null; // null = delete on v2beta1 PATCH
+  });
+  const hasTags = Object.keys(tagPatch).length > 0;
+  const hasContact = !!summary.contact;
   const [stepStatus, setStepStatus] = useState({
+    attributes: (hasTags || hasContact) ? 'pending' : 'skipped',
     subscription: summary.subscription ? 'pending' : 'skipped',
     application: 'pending',
     site: isUxi ? 'skipped' : 'pending',
@@ -2321,14 +2570,37 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
     };
 
     try {
-      if (summary.subscription) {
-        await assignStep('subscription', () =>
-          api.glAssignSubscription({ deviceId: summary.deviceId, subscriptionId: summary.subscription.id, ...settings })
+      // Apply tags + contact via a single PATCH — always run if either is set
+      if (hasTags || hasContact) {
+        await assignStep('attributes', () =>
+          api.glPatchAttributes({ deviceId: summary.deviceId, tags: tagPatch, contact: summary.contact, ...settings })
         );
       }
-      await assignStep('application', () =>
-        api.glAssignApplication({ deviceId: summary.deviceId, applicationId: summary.application.id, region: summary.applicationRegion, ...settings })
-      );
+
+      if (summary.subscription) {
+        // Skip subscription assignment if the same subscription is already on this device
+        const sameSubscription = summary.foundExisting && summary.currentSubscriptionKey
+          && summary.subscription.key === summary.currentSubscriptionKey;
+        if (sameSubscription) {
+          console.log('[provision] subscription unchanged — skipping GL assign');
+          set('subscription', 'skipped');
+        } else {
+          await assignStep('subscription', () =>
+            api.glAssignSubscription({ deviceId: summary.deviceId, subscriptionId: summary.subscription.id, ...settings })
+          );
+        }
+      }
+      // Skip application assignment if the same application is already assigned
+      const sameApplication = summary.foundExisting && summary.currentApplicationId
+        && summary.application?.id === summary.currentApplicationId;
+      if (sameApplication) {
+        console.log('[provision] application unchanged — skipping GL assign');
+        set('application', 'skipped');
+      } else {
+        await assignStep('application', () =>
+          api.glAssignApplication({ deviceId: summary.deviceId, applicationId: summary.application.id, region: summary.applicationRegion, ...settings })
+        );
+      }
       if (!isUxi) {
         // Site assignment API not available on any cluster — skip silently.
         // The site dropdown is kept in the UI for reference but no API call is made.
@@ -2373,9 +2645,9 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
   const rows = [
     { label: 'Serial',       value: summary.serial,                         mono: true },
     { label: 'MAC',          value: summary.mac,                            mono: true },
-    { label: 'Tags',         value: Object.keys(summary.tags || {}).length > 0 ? `${Object.keys(summary.tags).length} tag(s)` : 'None' },
+    { label: 'Tags',         value: (() => { const adds = Object.values(tagPatch).filter(v => v !== null).length; const dels = Object.values(tagPatch).filter(v => v === null).length; return adds > 0 || dels > 0 ? `${adds} tag${adds !== 1 ? 's' : ''}${dels > 0 ? ` (−${dels} removed)` : ''}` : 'None'; })(), step: (hasTags || hasContact) ? 'attributes' : null },
     { label: 'Location',     value: summary.location?.name || 'None' },
-    { label: 'Contact',      value: summary.contact ? `${userName(summary.contact)}${summary.contact.email ? ` — ${summary.contact.email}` : ''}` : 'None' },
+    { label: 'Contact',      value: summary.contact ? `${userName(summary.contact)}${summary.contact.email ? ` — ${summary.contact.email}` : ''}` : 'None', step: (hasTags || hasContact) ? 'attributes' : null },
     { label: 'Subscription', value: summary.subscription?.skuDescription || 'Skip', step: 'subscription' },
     { label: 'Service',      value: summary.application?.name,              step: 'application' },
     { label: 'Region',       value: summary.application?.regionName || regionLabel(summary.applicationRegion) },
@@ -2388,8 +2660,14 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
     <div className="p-5 space-y-5 step-enter">
       <div className="pt-2">
         <h2 className="text-white font-bold text-xl">Review & Confirm</h2>
-        <p className="text-gray-400 text-sm">Everything looks good? Let's provision.</p>
+        <p className="text-gray-400 text-sm">{summary.foundExisting ? 'Device already in GreenLake — updating assignments.' : "Everything looks good? Let's provision."}</p>
       </div>
+      {summary.foundExisting && (
+        <div className="flex items-start gap-3 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-2xl px-4 py-3">
+          <span className="text-amber-400 text-lg shrink-0">⚠️</span>
+          <p className="text-amber-300 text-sm">This device is already in GreenLake. Only changes you made on the previous screens will be applied.</p>
+        </div>
+      )}
       <Card className="space-y-0 divide-y divide-white divide-opacity-5">
         {rows.map(row => (
           <div key={row.label} className="flex items-center justify-between py-3 gap-3">
@@ -2626,14 +2904,56 @@ const App = () => {
               </div>
             )}
             <ScanScreen settings={liveSettings}
-              onScanned={(d, raw) => { upd({ ...d, rawBarcode: raw }); enterScreen('tags'); }}
+              onScanned={(d, raw) => {
+                upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null, currentSiteId: null, currentFunctionId: null });
+                // Background lookups — fetch a fresh token first so lookups don't fail
+                // if liveSettings.token is stale at the moment the scan fires.
+                getGlToken()
+                  .then(token => {
+                    const centralUrl = CLUSTERS.find(c => c.id === liveSettings.centralCluster)?.url || CLUSTERS[0].url;
+                    // Fire GL and Central lookups in parallel
+                    return Promise.all([
+                      api.glLookupDevice({ serial: d.serial, ...liveSettings, token }),
+                      api.centralGetDeviceSiteId({ serial: d.serial, centralToken: token, centralUrl }),
+                    ]);
+                  })
+                  .then(([existing, centralInfo]) => {
+                    const { siteId, persona } = centralInfo || {};
+                    console.log('[background lookup] existing:', !!existing, '| siteId:', siteId, '| persona:', persona);
+                    if (existing) {
+                      const patch = {
+                        currentTags:            existing.tags || {},
+                        // contact.workspaceUser.id for WORKSPACE-USER type; contact.id as fallback
+                        currentContactId:       existing.contact?.workspaceUser?.id || existing.contact?.id || null,
+                        currentLocationId:      existing.location?.id || null,
+                        // subscription is an array in the API response — use the normalised _subKey
+                        currentSubscriptionKey: existing._subKey || null,
+                        currentApplicationId:   existing.application?.id  || null,
+                      };
+                      console.log('[background lookup] upd patch:', JSON.stringify(patch));
+                      upd(patch);
+                    }
+                    // Persona 'None' means no function is configured — treat as null
+                    const fnId = (persona && persona !== 'None') ? persona : null;
+                    if (siteId || fnId) upd({
+                      ...(siteId ? { currentSiteId:     siteId } : {}),
+                      ...(fnId   ? { currentFunctionId: fnId   } : {}),
+                    });
+                  })
+                  .catch(e => console.warn('[background lookup] failed:', e.message));
+                enterScreen('tags');
+              }}
               onOpenSettings={() => setScreen('settings')} />
           </>
         )}
 
         {screen === 'tags' && (
           <TagsScreen settings={liveSettings} api={api}
-            initialTags={(() => { try { return JSON.parse(localStorage.getItem('aruba_last_tags')); } catch(e) { return null; } })()}
+            initialTags={
+              Object.keys(summary.currentTags || {}).length > 0
+                ? summary.currentTags
+                : (() => { try { return JSON.parse(localStorage.getItem('aruba_last_tags')); } catch(e) { return null; } })()
+            }
             onNext={tags => {
               if (Object.keys(tags).length > 0) localStorage.setItem('aruba_last_tags', JSON.stringify(tags));
               upd({ tags }); enterScreen('location');
@@ -2642,7 +2962,7 @@ const App = () => {
 
         {screen === 'location' && (
           <LocationScreen settings={liveSettings} api={api}
-            initialId={localStorage.getItem('aruba_last_location')}
+            initialId={summary.currentLocationId || localStorage.getItem('aruba_last_location')}
             onNext={loc => {
               if (loc?.id) localStorage.setItem('aruba_last_location', String(loc.id));
               upd({ location: loc }); enterScreen('contact');
@@ -2651,7 +2971,7 @@ const App = () => {
 
         {screen === 'contact' && (
           <ContactScreen settings={liveSettings} api={api}
-            initialId={localStorage.getItem('aruba_last_contact')}
+            initialId={summary.currentContactId || localStorage.getItem('aruba_last_contact')}
             onSelect={contact => {
               if (contact?.id) localStorage.setItem('aruba_last_contact', String(contact.id));
               upd({ contact }); enterScreen('adding_gl');
@@ -2670,10 +2990,15 @@ const App = () => {
                 deviceType: mapped,
                 deviceModel: device.model || device.deviceModel || null,
                 devicePartNumber: device.partNumber || null,
-                foundExisting:          device.foundExisting || false,
-                currentSubscriptionKey: device.subscription?.key || null,
-                currentApplicationId:   device.application?.id  || null,
+                foundExisting: device.foundExisting || false,
+                // Only overwrite current* values if the device response actually contains them —
+                // the background lookup (glLookupDevice) may have already set these and we
+                // don't want to clobber them with null if the v1 response omits the fields.
+                // subscription may be array or object; prefer _subKey normalised by glLookupDevice.
+                ...(device._subKey           ? { currentSubscriptionKey: device._subKey           } : {}),
+                ...(device.application?.id   ? { currentApplicationId:   device.application.id    } : {}),
               });
+              console.log('[onSuccess] _subKey:', device._subKey, '| application?.id:', device.application?.id);
               enterScreen(mapped ? 'subscription' : 'device_type');
             }}
             onBack={() => setScreen('location')} />
@@ -2696,12 +3021,13 @@ const App = () => {
 
         {screen === 'application' && (
           <ApplicationScreen settings={liveSettings} api={api} deviceType={summary.deviceType}
+            initialId={summary.currentApplicationId || null}
             onSelect={(app) => { upd({ application: app, applicationRegion: app.region }); enterScreen(summary.deviceType === 'UXI' ? 'review' : 'site'); }} />
         )}
 
         {screen === 'site' && (
           <SiteScreen settings={liveSettings} api={api}
-            initialId={localStorage.getItem('aruba_last_site')}
+            initialId={summary.currentSiteId || localStorage.getItem('aruba_last_site')}
             onSelect={site => {
               localStorage.setItem('aruba_last_site', String(site.id));
               upd({ site }); enterScreen('function');
@@ -2711,7 +3037,7 @@ const App = () => {
 
         {screen === 'function' && (
           <FunctionScreen deviceType={summary.deviceType}
-            initialId={localStorage.getItem('aruba_last_function')}
+            initialId={summary.currentFunctionId || localStorage.getItem('aruba_last_function')}
             onSelect={fn => {
               localStorage.setItem('aruba_last_function', fn.id);
               upd({ deviceFunction: fn }); setScreen('hostname');
