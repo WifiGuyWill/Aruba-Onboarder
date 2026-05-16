@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516f -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516g -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2185,7 +2185,7 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
 
   const validationError = (() => {
     if (!hostname) return '';
-    if (!/^[a-zA-Z0-9-]+$/.test(hostname)) return 'Only letters, numbers, and dashes allowed';
+    if (!/^[a-zA-Z0-9:-]+$/.test(hostname)) return 'Only letters, numbers, dashes, and colons allowed';
     if (hostname.length > maxLen) return `Max ${maxLen} characters for ${isCxSwitch ? 'CX switches' : 'this device'}`;
     return '';
   })();
@@ -2223,7 +2223,7 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
             <div className="flex justify-between items-center px-1">
               {validationError
                 ? <p className="text-red-400 text-xs">{validationError}</p>
-                : <p className="text-gray-600 text-xs">Letters, numbers, and dashes only</p>
+                : <p className="text-gray-600 text-xs">Letters, numbers, dashes, and colons</p>
               }
               {isCxSwitch && (
                 <p className={`text-xs shrink-0 ${hostname.length > maxLen * 0.85 ? 'text-amber-400' : 'text-gray-600'}`}>
