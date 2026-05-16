@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516o -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -752,6 +752,160 @@ const liveApi = {
       : `Function assignment failed (all formats rejected — assign manually in Aruba Central):\n${errors.map(e => e.slice(0, 200)).join('\n')}`;
     throw Object.assign(new Error(softMsg), { softFail: true });
   },
+
+  // Central: GET device name from monitoring API. Silent failure — device may not be online yet.
+  async centralGetSystemInfo({ serial, deviceType, centralToken, centralUrl }) {
+    const type = (deviceType || '').toUpperCase();
+
+    // Map device type → New Central config persona
+    // Persona is required on system-info POST/PATCH to target the correct config layer
+    let persona = 'CAMPUS_AP'; // default
+    if (type.includes('SWITCH')) persona = 'ACCESS_SWITCH';
+    else if (type === 'GATEWAY' || type === 'GW') persona = 'BRANCH_GW';
+
+    const monPaths = [];
+    if (type === 'AP' || type === 'IAP') monPaths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
+    else if (type.includes('SWITCH'))   monPaths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
+    else if (type === 'GATEWAY' || type === 'GW') monPaths.push(`/network-monitoring/v1alpha1/gateways/${encodeURIComponent(serial)}`);
+    // Generic fallbacks
+    monPaths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
+    monPaths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
+
+    // Step 1: fetch deviceName from monitoring API (read-only)
+    let monData = null;
+    for (const path of [...new Set(monPaths)]) {
+      try {
+        const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
+        console.log('[centralGetSystemInfo] monitoring', path, '→', res.status);
+        if (res.ok) {
+          monData = await res.json();
+          console.log('[centralGetSystemInfo] deviceName:', monData.deviceName, '| serial:', monData.serialNumber);
+          break;
+        }
+      } catch (e) { console.warn('[centralGetSystemInfo] monitoring fail:', path, e.message); }
+    }
+
+    // Step 2: discover the numeric scope_id needed for config PATCH.
+    // The config layer uses a large integer scope_id stored as scopeId/scopeName pairs
+    // in /network-config/v1alpha1/devices — scopeName equals the device's serial number.
+    // Note: ?serial= query param does NOT filter the results; we fetch all and match client-side.
+    let numericScopeId = null;
+
+    // The /network-config/v1alpha1/devices API requires a ?serial= param to return 200
+    // (it ignores the value and returns all devices, but omitting it triggers a 400).
+    // Each item in the list has scopeName (= device serial) and scopeId (= numeric config ID).
+    // We match by scopeName to find the target device's scopeId.
+    try {
+      const res = await proxyCall({
+        url: `https://${centralUrl}/network-config/v1alpha1/devices?serial=${encodeURIComponent(serial)}`,
+        token: centralToken,
+      });
+      console.log('[centralGetSystemInfo] config devices →', res.status);
+      if (res.ok) {
+        const d = await res.json();
+        const items = d.items || d.devices || (Array.isArray(d) ? d : []);
+        // Log ALL scopeNames so we can confirm which devices are in the list
+        console.log('[centralGetSystemInfo] config devices scopeNames:', items.map(i => i.scopeName).join(', '));
+        const match = items.find(item =>
+          String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
+        );
+        if (match) {
+          // Log full match so we can see every field and confirm the correct scopeId
+          console.log('[centralGetSystemInfo] matched device:', JSON.stringify(match));
+          const raw = match.scope_id || match.scopeId || match.uid || match.id;
+          if (raw && /^\d+$/.test(String(raw))) {
+            numericScopeId = String(raw);
+            console.log('[centralGetSystemInfo] scopeId for PATCH:', numericScopeId);
+          }
+        } else {
+          console.warn('[centralGetSystemInfo] device not found in config devices list — scopeName mismatch?');
+        }
+      } else {
+        const errTxt = await res.clone().text().catch(() => '');
+        console.warn('[centralGetSystemInfo] config devices 400 body:', errTxt.slice(0, 200));
+      }
+    } catch (e) { console.warn('[centralGetSystemInfo] config devices fail:', e.message); }
+
+    // Step 3: now that we have the numeric scopeId, read the system-info record.
+    // Include persona + object_type=LOCAL so we read the device-level config layer.
+    let sysInfo = null;
+    if (numericScopeId) {
+      const siParamSets = [
+        `scope-id=${encodeURIComponent(numericScopeId)}&persona=${persona}&object_type=LOCAL&view-type=LOCAL`,
+        `scope-id=${encodeURIComponent(numericScopeId)}&persona=${persona}&view-type=LOCAL`,
+        `scope-id=${encodeURIComponent(numericScopeId)}&view-type=LOCAL`,
+      ];
+      for (const params of siParamSets) {
+        try {
+          const res = await proxyCall({
+            url: `https://${centralUrl}/network-config/v1alpha1/system-info?${params}`,
+            token: centralToken,
+          });
+          console.log(`[centralGetSystemInfo] system-info GET ?${params} →`, res.status);
+          if (res.ok) {
+            sysInfo = await res.json();
+            console.log('[centralGetSystemInfo] system-info record:', JSON.stringify(sysInfo));
+            break;
+          } else {
+            const errTxt = await res.clone().text().catch(() => '');
+            console.warn(`[centralGetSystemInfo] system-info GET failed:`, errTxt.slice(0, 200));
+          }
+        } catch (e) { console.warn('[centralGetSystemInfo] system-info GET error:', e.message); }
+      }
+    }
+
+    console.log('[centralGetSystemInfo] numericScopeId:', numericScopeId, '| persona:', persona, '| deviceName:', monData?.deviceName);
+    if (!monData && !numericScopeId) return null;
+    return { ...(monData || {}), _scopeId: numericScopeId, _persona: persona, _sysInfo: sysInfo };
+  },
+
+  // Central: set/update device hostname via the config API.
+  // Endpoint: /network-config/v1alpha1/system-info?scope-id={numericId}
+  //
+  // Two cases:
+  // Set hostname on an Aruba device via the New Central network-config API.
+  //
+  // The correct approach (from HPE pycentral v2 workflows):
+  //   - POST /network-config/v1alpha1/system-info?scope-id=<id>&persona=<PERSONA>&object_type=LOCAL
+  //     when no hostname exists on the device
+  //   - PATCH same URL when a hostname already exists
+  //   Body is always: { "hostname": "<value>" }
+  //
+  // The persona param (CAMPUS_AP, ACCESS_SWITCH, BRANCH_GW…) is REQUIRED — without it,
+  // the API returns 200 but silently ignores the change (wrong config layer targeted).
+  async centralSetHostname({ serial, hostname, hostnameExists, scopeId, persona, deviceType, centralToken, centralUrl }) {
+    const errors = [];
+
+    if (!scopeId) {
+      console.warn('[centralSetHostname] no numeric scope_id — cannot update');
+      throw new Error('Hostname update failed — device scope ID not found. Assign hostname manually in Aruba Central.');
+    }
+
+    const resolvedPersona = persona || 'CAMPUS_AP';
+    const baseUrl = `https://${centralUrl}/network-config/v1alpha1/system-info` +
+      `?scope-id=${encodeURIComponent(scopeId)}&persona=${resolvedPersona}&object_type=LOCAL`;
+    const body = { hostname };
+
+    console.log(`[centralSetHostname] scope_id=${scopeId} persona=${resolvedPersona} hostnameExists=${hostnameExists}`);
+
+    // When no hostname is set, we must POST to create the record.
+    // When one exists, PATCH updates it.
+    // We always try both in case hostnameExists was detected incorrectly.
+    const methods = hostnameExists ? ['PATCH', 'POST'] : ['POST', 'PATCH'];
+
+    for (const method of methods) {
+      try {
+        console.log(`[centralSetHostname] ${method} ${baseUrl}`);
+        const res = await proxyCall({ url: baseUrl, method, token: centralToken, body });
+        const txt = !res.ok ? await res.clone().text() : '';
+        console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
+        if (res.ok) return res.json().catch(() => ({ success: true }));
+        errors.push(`${method} → ${res.status}: ${txt.slice(0, 200)}`);
+      } catch (e) { errors.push(`${method} → ${e.message}`); }
+    }
+
+    throw new Error(`Hostname update failed.\n${errors.join('\n')}`);
+  },
 };
 
 // ── DEMO API ───────────────────────────────────────────────────────────────────
@@ -815,6 +969,14 @@ const demoApi = {
   ]; },
   async centralAssignSite()    { await delay(800); return { success: true }; },
   async centralAssignFunction(){ await delay(600); return { success: true }; },
+  async centralGetSystemInfo({ serial } = {}) {
+    await delay(350);
+    // Return an existing hostname only for EXIST* serials so demo mode shows the pre-fill path
+    if ((serial || '').startsWith('EXIST')) return { deviceName: 'AP-existing-device', _scopeId: '73891316876853248' };
+    // New devices get a scope_id but no existing hostname
+    return { _scopeId: '73891316876853001' };
+  },
+  async centralSetHostname()   { await delay(500); return { success: true }; },
 };
 
 // ── BARCODE PARSER ─────────────────────────────────────────────────────────────
@@ -2026,6 +2188,100 @@ const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
 };
 
 // ── SCREEN: REVIEW ────────────────────────────────────────────────────────────
+// ── SCREEN: HOSTNAME (optional) ───────────────────────────────────────────────
+const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) => {
+  const [hostname, setHostname] = useState('');
+  const [currentHostname, setCurrentHostname] = useState(null);
+  const [hostnameExists, setHostnameExists] = useState(false);
+  const [scopeId, setScopeId] = useState(null);
+  const [persona, setPersona] = useState('CAMPUS_AP');
+  const [loading, setLoading] = useState(true);
+
+  const isCxSwitch = deviceType === 'SWITCH_CX' || deviceType === 'SWITCH';
+  const maxLen = isCxSwitch ? 32 : 128;
+  const centralUrl = CLUSTERS.find(c => c.id === settings.centralCluster)?.url || CLUSTERS[0].url;
+
+  useEffect(() => {
+    api.centralGetSystemInfo({ serial, deviceType, ...settings, centralUrl })
+      .then(d => {
+        if (d?._scopeId) setScopeId(d._scopeId);
+        if (d?._persona) setPersona(d._persona);
+        if (d?.deviceName) {
+          // MAC address (e.g. 3c:e8:6e:c0:77:1d) means no real hostname is configured —
+          // Central uses the MAC as a fallback display name when the system-info record
+          // doesn't exist. Show it as current but don't treat it as an existing hostname.
+          const isMac = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/i.test(d.deviceName);
+          setCurrentHostname(d.deviceName);
+          setHostname(d.deviceName);
+          setHostnameExists(!isMac);
+        }
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const validationError = (() => {
+    if (!hostname) return '';
+    if (!/^[a-zA-Z0-9:-]+$/.test(hostname)) return 'Only letters, numbers, dashes, and colons allowed';
+    if (hostname.length > maxLen) return `Max ${maxLen} characters for ${isCxSwitch ? 'CX switches' : 'this device'}`;
+    return '';
+  })();
+
+  const canSubmit = hostname.trim().length > 0 && !validationError;
+
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Hostname <span className="text-gray-500 font-normal text-base">— optional</span></h2>
+        <p className="text-gray-400 text-sm">Set a name for this device in Aruba Central</p>
+      </div>
+
+      {loading ? <Spinner /> : (
+        <>
+          {currentHostname && (
+            <div className="flex items-center gap-2 px-1">
+              <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider shrink-0">Current</p>
+              <p className="text-gray-400 text-sm font-mono truncate">{currentHostname}</p>
+            </div>
+          )}
+          <div className="space-y-1.5">
+            <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider px-1">
+              {currentHostname ? 'New Hostname' : 'Set Hostname'}
+            </p>
+            <input
+              value={hostname}
+              onChange={e => setHostname(e.target.value)}
+              placeholder="e.g. AP-lobby-floor2"
+              maxLength={maxLen}
+              autoCapitalize="none"
+              autoCorrect="off"
+              className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm font-mono"
+            />
+            <div className="flex justify-between items-center px-1">
+              {validationError
+                ? <p className="text-red-400 text-xs">{validationError}</p>
+                : <p className="text-gray-600 text-xs">Letters, numbers, dashes, and colons</p>
+              }
+              {isCxSwitch && (
+                <p className={`text-xs shrink-0 ${hostname.length > maxLen * 0.85 ? 'text-amber-400' : 'text-gray-600'}`}>
+                  {hostname.length}/{maxLen}
+                </p>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      <div className="space-y-2.5 pt-1">
+        <Btn onClick={() => canSubmit && onNext({ hostname: hostname.trim(), hostnameExists, scopeId, persona })} disabled={!canSubmit || loading}>
+          {currentHostname ? 'Update Hostname →' : 'Set Hostname →'}
+        </Btn>
+        <Btn variant="secondary" onClick={onSkip}>Skip for Now</Btn>
+      </div>
+    </div>
+  );
+};
+
 const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
   const isUxi = summary.deviceType === 'UXI';
   const [submitting, setSubmitting] = useState(false);
@@ -2034,6 +2290,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
     application: 'pending',
     site: isUxi ? 'skipped' : 'pending',
     function: (isUxi || !summary.deviceFunction) ? 'skipped' : 'pending',
+    hostname: (isUxi || !summary.hostname) ? 'skipped' : 'pending',
   });
   const [errorMsg, setErrorMsg] = useState('');
   const set = (k, v) => setStepStatus(p => ({ ...p, [k]: v }));
@@ -2090,6 +2347,16 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
             }
           }
         }
+        if (summary.hostname) {
+          set('hostname', 'loading');
+          try {
+            await api.centralSetHostname({ serial: summary.serial, hostname: summary.hostname, hostnameExists: summary.hostnameExists, scopeId: summary.hostnameScopeId, persona: summary.hostnamePersona || 'CAMPUS_AP', deviceType: summary.deviceType, ...settings, centralUrl });
+            set('hostname', 'success');
+          } catch (hnErr) {
+            set('hostname', 'skipped');
+            setErrorMsg(prev => [prev, 'Hostname could not be set — assign manually in Aruba Central'].filter(Boolean).join('\n'));
+          }
+        }
       }
       setTimeout(onDone, 600);
     } catch (err) {
@@ -2114,6 +2381,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
     { label: 'Region',       value: summary.application?.regionName || regionLabel(summary.applicationRegion) },
     { label: 'Site',         value: summary.site?.name,                     step: 'site' },
     { label: 'Function',     value: summary.deviceFunction?.label,          step: 'function' },
+    { label: 'Hostname',     value: summary.hostname,                       step: 'hostname' },
   ];
 
   return (
@@ -2162,12 +2430,13 @@ const SuccessScreen = ({ summary, onAnother }) => (
     <Card className="space-y-0 divide-y divide-white divide-opacity-5">
       {[
         ['Serial',       summary.serial,                                  true ],
+        summary.hostname ? ['Hostname', summary.hostname,                true ] : null,
         ['Site',         summary.site?.name,                              false],
         ['Function',     summary.deviceFunction?.label,                   false],
         ['Application',  summary.application?.name,                       false],
         ['Subscription', summary.subscription?.skuDescription || 'None', false],
         ['Tags',         Object.keys(summary.tags || {}).length > 0 ? Object.entries(summary.tags).map(([k,v]) => `${k}${v?':'+v:''}`).join(', ') : 'None', false],
-      ].map(([label, value, mono]) => (
+      ].filter(Boolean).map(([label, value, mono]) => (
         <div key={label} className="flex justify-between py-3 gap-3">
           <span className="text-gray-400 text-sm">{label}</span>
           <span className={`text-white text-sm ${mono ? 'font-mono' : 'font-medium'} text-right truncate max-w-[200px]`}>{value || '—'}</span>
@@ -2181,8 +2450,8 @@ const SuccessScreen = ({ summary, onAnother }) => (
 // ── APP ────────────────────────────────────────────────────────────────────────
 const STEPS = ['scan','tags','location','contact','adding_gl','device_type','subscription','application','site','function','review'];
 // device_type is a fallback screen — give it the same progress value as subscription so the bar doesn't jump.
-const STEP_PROGRESS = { scan:0, tags:1, location:2, contact:3, adding_gl:4, device_type:5, subscription:5, application:6, site:7, function:8, review:9 };
-const TOTAL_STEPS = 9;
+const STEP_PROGRESS = { scan:0, tags:1, location:2, contact:3, adding_gl:4, device_type:5, subscription:5, application:6, site:7, function:8, hostname:9, review:10 };
+const TOTAL_STEPS = 10;
 
 const defaultSettings = () => ({
   glClientId: '', glClientSecret: '', workspaceId: '',
@@ -2445,15 +2714,23 @@ const App = () => {
             initialId={localStorage.getItem('aruba_last_function')}
             onSelect={fn => {
               localStorage.setItem('aruba_last_function', fn.id);
-              upd({ deviceFunction: fn }); setScreen('review');
+              upd({ deviceFunction: fn }); setScreen('hostname');
             }}
-            onSkip={() => { upd({ deviceFunction: null }); setScreen('review'); }} />
+            onSkip={() => { upd({ deviceFunction: null }); setScreen('hostname'); }} />
+        )}
+
+        {screen === 'hostname' && (
+          <HostnameScreen settings={liveSettings} api={api}
+            deviceType={summary.deviceType}
+            serial={summary.serial}
+            onNext={({ hostname, hostnameExists, scopeId, persona }) => { upd({ hostname, hostnameExists, hostnameScopeId: scopeId || null, hostnamePersona: persona || 'CAMPUS_AP' }); setScreen('review'); }}
+            onSkip={() => { upd({ hostname: null, hostnameExists: false, hostnameScopeId: null }); setScreen('review'); }} />
         )}
 
         {screen === 'review' && (
           <ReviewScreen summary={summary} settings={liveSettings} api={api}
             onDone={() => setScreen('success')}
-            onBack={() => setScreen(summary.deviceType === 'UXI' ? 'application' : 'function')} />
+            onBack={() => setScreen(summary.deviceType === 'UXI' ? 'application' : 'hostname')} />
         )}
 
         {screen === 'success' && (
