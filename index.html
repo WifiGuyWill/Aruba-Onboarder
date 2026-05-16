@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516l -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516o -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -756,6 +756,13 @@ const liveApi = {
   // Central: GET device name from monitoring API. Silent failure — device may not be online yet.
   async centralGetSystemInfo({ serial, deviceType, centralToken, centralUrl }) {
     const type = (deviceType || '').toUpperCase();
+
+    // Map device type → New Central config persona
+    // Persona is required on system-info POST/PATCH to target the correct config layer
+    let persona = 'CAMPUS_AP'; // default
+    if (type.includes('SWITCH')) persona = 'ACCESS_SWITCH';
+    else if (type === 'GATEWAY' || type === 'GW') persona = 'BRANCH_GW';
+
     const monPaths = [];
     if (type === 'AP' || type === 'IAP') monPaths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
     else if (type.includes('SWITCH'))   monPaths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
@@ -811,7 +818,7 @@ const liveApi = {
             console.log('[centralGetSystemInfo] scopeId for PATCH:', numericScopeId);
           }
         } else {
-          console.warn('[centralGetSystemInfo] VNT9M5904F not found in config devices list');
+          console.warn('[centralGetSystemInfo] device not found in config devices list — scopeName mismatch?');
         }
       } else {
         const errTxt = await res.clone().text().catch(() => '');
@@ -819,17 +826,16 @@ const liveApi = {
       }
     } catch (e) { console.warn('[centralGetSystemInfo] config devices fail:', e.message); }
 
-    // Step 3: now that we have the numeric scopeId, read the system-info record directly.
-    // This tells us the exact current structure — field names, hostname value, alias state —
-    // so we know exactly what to send on write.
+    // Step 3: now that we have the numeric scopeId, read the system-info record.
+    // Include persona + object_type=LOCAL so we read the device-level config layer.
     let sysInfo = null;
     if (numericScopeId) {
-      const siParams = [
+      const siParamSets = [
+        `scope-id=${encodeURIComponent(numericScopeId)}&persona=${persona}&object_type=LOCAL&view-type=LOCAL`,
+        `scope-id=${encodeURIComponent(numericScopeId)}&persona=${persona}&view-type=LOCAL`,
         `scope-id=${encodeURIComponent(numericScopeId)}&view-type=LOCAL`,
-        `scope-id=${encodeURIComponent(numericScopeId)}`,
-        `scope-id=${encodeURIComponent(numericScopeId)}&view-type=LOCAL&detailed=true`,
       ];
-      for (const params of siParams) {
+      for (const params of siParamSets) {
         try {
           const res = await proxyCall({
             url: `https://${centralUrl}/network-config/v1alpha1/system-info?${params}`,
@@ -848,64 +854,57 @@ const liveApi = {
       }
     }
 
-    console.log('[centralGetSystemInfo] numericScopeId:', numericScopeId, '| deviceName:', monData?.deviceName);
+    console.log('[centralGetSystemInfo] numericScopeId:', numericScopeId, '| persona:', persona, '| deviceName:', monData?.deviceName);
     if (!monData && !numericScopeId) return null;
-    return { ...(monData || {}), _scopeId: numericScopeId, _sysInfo: sysInfo };
+    return { ...(monData || {}), _scopeId: numericScopeId, _persona: persona, _sysInfo: sysInfo };
   },
 
   // Central: set/update device hostname via the config API.
   // Endpoint: /network-config/v1alpha1/system-info?scope-id={numericId}
   //
   // Two cases:
-  //   Record exists   → PATCH { hostname } works (alias reference already in place)
-  //   Record missing  → POST/PUT alone silently no-ops; must include hostname-alias
-  //                     to tell Central which alias stores the value.
+  // Set hostname on an Aruba device via the New Central network-config API.
   //
-  // Strategy: try PATCH first; if it fails with a "doesn't exist" error, retry
-  // POST then PUT with the full alias body to create the record.
-  async centralSetHostname({ serial, hostname, hostnameExists, scopeId, centralToken, centralUrl }) {
+  // The correct approach (from HPE pycentral v2 workflows):
+  //   - POST /network-config/v1alpha1/system-info?scope-id=<id>&persona=<PERSONA>&object_type=LOCAL
+  //     when no hostname exists on the device
+  //   - PATCH same URL when a hostname already exists
+  //   Body is always: { "hostname": "<value>" }
+  //
+  // The persona param (CAMPUS_AP, ACCESS_SWITCH, BRANCH_GW…) is REQUIRED — without it,
+  // the API returns 200 but silently ignores the change (wrong config layer targeted).
+  async centralSetHostname({ serial, hostname, hostnameExists, scopeId, persona, deviceType, centralToken, centralUrl }) {
     const errors = [];
 
     if (!scopeId) {
-      console.warn('[centralSetHostname] no numeric scope_id available');
+      console.warn('[centralSetHostname] no numeric scope_id — cannot update');
+      throw new Error('Hostname update failed — device scope ID not found. Assign hostname manually in Aruba Central.');
     }
 
-    if (scopeId) {
-      const url = `https://${centralUrl}/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(scopeId)}`;
-      // Always include hostname-alias so Central knows which alias stores the value.
-      // This is a no-op when the alias already exists (update case) and required
-      // when the alias was removed (e.g. hostname deleted via Central UI).
-      const body = { hostname, 'hostname-alias': 'sys_host_name' };
+    const resolvedPersona = persona || 'CAMPUS_AP';
+    const baseUrl = `https://${centralUrl}/network-config/v1alpha1/system-info` +
+      `?scope-id=${encodeURIComponent(scopeId)}&persona=${resolvedPersona}&object_type=LOCAL`;
+    const body = { hostname };
 
-      // Try PATCH first (update existing record), then PUT, then POST
-      for (const method of ['PATCH', 'PUT', 'POST']) {
-        console.log(`[centralSetHostname] ${method} scope_id=${scopeId}`);
-        const res = await proxyCall({ url, method, token: centralToken, body });
+    console.log(`[centralSetHostname] scope_id=${scopeId} persona=${resolvedPersona} hostnameExists=${hostnameExists}`);
+
+    // When no hostname is set, we must POST to create the record.
+    // When one exists, PATCH updates it.
+    // We always try both in case hostnameExists was detected incorrectly.
+    const methods = hostnameExists ? ['PATCH', 'POST'] : ['POST', 'PATCH'];
+
+    for (const method of methods) {
+      try {
+        console.log(`[centralSetHostname] ${method} ${baseUrl}`);
+        const res = await proxyCall({ url: baseUrl, method, token: centralToken, body });
         const txt = !res.ok ? await res.clone().text() : '';
         console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
         if (res.ok) return res.json().catch(() => ({ success: true }));
-        // "already exists" on POST means record is there — don't retry further
-        if (method === 'POST' && txt.includes('already exists')) break;
         errors.push(`${method} → ${res.status}: ${txt.slice(0, 200)}`);
-      }
+      } catch (e) { errors.push(`${method} → ${e.message}`); }
     }
 
-    // Last-resort fallback: legacy configuration endpoints (serial-based, older clusters)
-    const fallbacks = [
-      { method: 'PUT',   path: `/configuration/v1/devices/${encodeURIComponent(serial)}`, body },
-      { method: 'PATCH', path: `/configuration/v1/devices/${encodeURIComponent(serial)}`, body },
-    ];
-    for (const { method, path, body: fb } of fallbacks) {
-      try {
-        const res = await proxyCall({ url: `https://${centralUrl}${path}`, method, token: centralToken, body: fb });
-        const txt = !res.ok ? await res.clone().text() : '';
-        console.log(`[centralSetHostname] fallback ${method} ${path} →`, res.status, txt || 'OK');
-        if (res.ok) return res.json().catch(() => ({ success: true }));
-        if (res.status !== 404) errors.push(`${method} ${path} → ${res.status}: ${txt.slice(0, 150)}`);
-      } catch (e) { errors.push(`${method} ${path} → ${e.message}`); }
-    }
-
-    throw new Error(`Hostname update failed — numeric scope_id ${scopeId ? 'provided but rejected' : 'not found'}.\n${errors.join('\n')}`);
+    throw new Error(`Hostname update failed.\n${errors.join('\n')}`);
   },
 };
 
@@ -2195,6 +2194,7 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
   const [currentHostname, setCurrentHostname] = useState(null);
   const [hostnameExists, setHostnameExists] = useState(false);
   const [scopeId, setScopeId] = useState(null);
+  const [persona, setPersona] = useState('CAMPUS_AP');
   const [loading, setLoading] = useState(true);
 
   const isCxSwitch = deviceType === 'SWITCH_CX' || deviceType === 'SWITCH';
@@ -2205,6 +2205,7 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
     api.centralGetSystemInfo({ serial, deviceType, ...settings, centralUrl })
       .then(d => {
         if (d?._scopeId) setScopeId(d._scopeId);
+        if (d?._persona) setPersona(d._persona);
         if (d?.deviceName) {
           // MAC address (e.g. 3c:e8:6e:c0:77:1d) means no real hostname is configured —
           // Central uses the MAC as a fallback display name when the system-info record
@@ -2272,7 +2273,7 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
       )}
 
       <div className="space-y-2.5 pt-1">
-        <Btn onClick={() => canSubmit && onNext({ hostname: hostname.trim(), hostnameExists, scopeId })} disabled={!canSubmit || loading}>
+        <Btn onClick={() => canSubmit && onNext({ hostname: hostname.trim(), hostnameExists, scopeId, persona })} disabled={!canSubmit || loading}>
           {currentHostname ? 'Update Hostname →' : 'Set Hostname →'}
         </Btn>
         <Btn variant="secondary" onClick={onSkip}>Skip for Now</Btn>
@@ -2349,7 +2350,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
         if (summary.hostname) {
           set('hostname', 'loading');
           try {
-            await api.centralSetHostname({ serial: summary.serial, hostname: summary.hostname, hostnameExists: summary.hostnameExists, scopeId: summary.hostnameScopeId, ...settings, centralUrl });
+            await api.centralSetHostname({ serial: summary.serial, hostname: summary.hostname, hostnameExists: summary.hostnameExists, scopeId: summary.hostnameScopeId, persona: summary.hostnamePersona || 'CAMPUS_AP', deviceType: summary.deviceType, ...settings, centralUrl });
             set('hostname', 'success');
           } catch (hnErr) {
             set('hostname', 'skipped');
@@ -2722,7 +2723,7 @@ const App = () => {
           <HostnameScreen settings={liveSettings} api={api}
             deviceType={summary.deviceType}
             serial={summary.serial}
-            onNext={({ hostname, hostnameExists, scopeId }) => { upd({ hostname, hostnameExists, hostnameScopeId: scopeId || null }); setScreen('review'); }}
+            onNext={({ hostname, hostnameExists, scopeId, persona }) => { upd({ hostname, hostnameExists, hostnameScopeId: scopeId || null, hostnamePersona: persona || 'CAMPUS_AP' }); setScreen('review'); }}
             onSkip={() => { upd({ hostname: null, hostnameExists: false, hostnameScopeId: null }); setScreen('review'); }} />
         )}
 
