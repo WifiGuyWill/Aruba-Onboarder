@@ -470,15 +470,21 @@ const liveApi = {
       const device = (d.items || [])[0];
       if (!device) return null;
 
-      // Step 2: fetch full detail by device ID — list endpoint omits contact + subscription
+      // Step 2: fetch full detail by device ID — list endpoint may omit contact + subscription
       try {
         const detailRes = await proxyCall({
           url: `${GL_BASE}/devices/v1/devices/${encodeURIComponent(device.id)}`,
           token,
         });
+        console.log('[glLookupDevice] detail GET →', detailRes.status);
         if (detailRes.ok) {
           const detail = await detailRes.json();
-          Object.assign(device, detail);
+          console.log('[glLookupDevice] detail raw: sub=', JSON.stringify(detail.subscription), '| contact=', JSON.stringify(detail.contact), '| location=', JSON.stringify(detail.location));
+          // Only overwrite fields that are null/undefined in the list response —
+          // the detail GET sometimes returns null for fields the list GET had populated.
+          Object.keys(detail).forEach(k => {
+            if (device[k] === null || device[k] === undefined) device[k] = detail[k];
+          });
         }
       } catch (e2) {
         console.warn('[glLookupDevice] detail GET failed:', e2.message);
@@ -487,7 +493,7 @@ const liveApi = {
       // subscription is returned as an array — extract the first entry's key
       const subArr = Array.isArray(device.subscription) ? device.subscription : (device.subscription ? [device.subscription] : []);
       const subKey = subArr[0]?.key || null;
-      console.log('[glLookupDevice] found:', device.id, '| tags:', JSON.stringify(device.tags), '| contact:', device.contact?.id, '| subscription:', subKey, '| application:', device.application?.id);
+      console.log('[glLookupDevice] found:', device.id, '| tags:', JSON.stringify(device.tags), '| contact:', JSON.stringify(device.contact), '| location:', device.location?.id, '| subscription:', subKey, '| application:', device.application?.id);
       // Normalise subscription to a plain object for downstream code
       device._subKey = subKey;
       device._subId  = subArr[0]?.id  || null;
@@ -2854,14 +2860,19 @@ const App = () => {
                     ]);
                   })
                   .then(([existing, siteId]) => {
-                    if (existing) upd({
-                      currentTags:            existing.tags || {},
-                      currentContactId:       existing.contact?.id || null,
-                      currentLocationId:      existing.location?.id || null,
-                      // subscription is an array in the API response — use the normalised _subKey
-                      currentSubscriptionKey: existing._subKey || null,
-                      currentApplicationId:   existing.application?.id  || null,
-                    });
+                    console.log('[background lookup] existing:', !!existing, '| siteId:', siteId);
+                    if (existing) {
+                      const patch = {
+                        currentTags:            existing.tags || {},
+                        currentContactId:       existing.contact?.id || null,
+                        currentLocationId:      existing.location?.id || null,
+                        // subscription is an array in the API response — use the normalised _subKey
+                        currentSubscriptionKey: existing._subKey || null,
+                        currentApplicationId:   existing.application?.id  || null,
+                      };
+                      console.log('[background lookup] upd patch:', JSON.stringify(patch));
+                      upd(patch);
+                    }
                     if (siteId) upd({ currentSiteId: siteId });
                   })
                   .catch(e => console.warn('[background lookup] failed:', e.message));
