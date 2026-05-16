@@ -772,81 +772,44 @@ const liveApi = {
         console.log('[centralGetSystemInfo] monitoring', path, '→', res.status);
         if (res.ok) {
           monData = await res.json();
-          console.log('[centralGetSystemInfo] monitoring response:', JSON.stringify(monData));
+          console.log('[centralGetSystemInfo] deviceName:', monData.deviceName, '| serial:', monData.serialNumber);
           break;
         }
       } catch (e) { console.warn('[centralGetSystemInfo] monitoring fail:', path, e.message); }
     }
 
-    // Step 2: attempt to discover the numeric scope_id needed for config PATCH.
-    // Central's config layer uses a large integer scope_id (e.g. "73891316876853248")
-    // which is different from the serial number. Try several lookup endpoints.
+    // Step 2: discover the numeric scope_id needed for config PATCH.
+    // The config layer uses a large integer scope_id stored as scopeId/scopeName pairs
+    // in /network-config/v1alpha1/devices — scopeName equals the device's serial number.
+    // Note: ?serial= query param does NOT filter the results; we fetch all and match client-side.
     let numericScopeId = null;
 
-    // 2a: Check if monitoring response already contains a numeric device id
-    if (monData) {
-      for (const key of ['scope_id', 'scopeId', 'uid', 'device_id']) {
-        const v = monData[key];
-        if (v && /^\d{10,}$/.test(String(v))) { numericScopeId = String(v); break; }
-      }
-    }
-
-    // 2b: Try config-layer device listing APIs if we still don't have it
-    if (!numericScopeId) {
-      const scopeLookups = [
-        `/network-config/v1alpha1/devices?serial=${encodeURIComponent(serial)}`,
-        `/network-config/v1alpha1/aps?serial=${encodeURIComponent(serial)}`,
-        `/network-config/v1alpha1/switches?serial=${encodeURIComponent(serial)}`,
-        `/network-config/v1alpha1/gateways?serial=${encodeURIComponent(serial)}`,
-      ];
-      for (const path of scopeLookups) {
-        try {
-          const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
-          console.log('[centralGetSystemInfo] scope lookup', path, '→', res.status);
-          if (!res.ok) continue;
-          const d = await res.json();
-          console.log('[centralGetSystemInfo] scope lookup response:', JSON.stringify(d).slice(0, 500));
-          // Response may be an object or an array; look for a large numeric id
-          const candidates = [d, d.devices, d.aps, d.switches, d.gateways, d.data]
-            .flat().filter(Boolean);
-          for (const item of candidates) {
-            for (const key of ['scope_id', 'scopeId', 'uid', 'id', 'device_id']) {
-              const v = item[key];
-              if (v && /^\d{10,}$/.test(String(v))) { numericScopeId = String(v); break; }
-            }
-            if (numericScopeId) break;
+    try {
+      const res = await proxyCall({
+        url: `https://${centralUrl}/network-config/v1alpha1/devices?limit=1000`,
+        token: centralToken,
+      });
+      console.log('[centralGetSystemInfo] config devices →', res.status);
+      if (res.ok) {
+        const d = await res.json();
+        const items = d.items || d.devices || (Array.isArray(d) ? d : []);
+        console.log('[centralGetSystemInfo] config devices total:', items.length);
+        // Each item has scopeName (= serial) and scopeId (= numeric config ID)
+        const match = items.find(item =>
+          String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
+        );
+        if (match) {
+          const raw = match.scopeId || match.id;
+          if (raw && /^\d+$/.test(String(raw))) {
+            numericScopeId = String(raw);
+            console.log('[centralGetSystemInfo] found scopeId:', numericScopeId, 'for', serial);
           }
-          if (numericScopeId) break;
-        } catch (e) { console.warn('[centralGetSystemInfo] scope lookup fail:', path, e.message); }
-      }
-    }
-
-    // 2c: Try GET /network-config/v1alpha1/system-info — some clusters return a list
-    //     with annotations that include the numeric scope_id
-    if (!numericScopeId) {
-      try {
-        const res = await proxyCall({
-          url: `https://${centralUrl}/network-config/v1alpha1/system-info?view-type=LOCAL&detailed=true`,
-          token: centralToken,
-        });
-        console.log('[centralGetSystemInfo] system-info list GET →', res.status);
-        if (res.ok) {
-          const d = await res.json();
-          console.log('[centralGetSystemInfo] system-info list:', JSON.stringify(d).slice(0, 800));
-          // Response may include _annotations, items, or a list with scope ids
-          const items = [d, d.items, d.data, d['system-info-list']].flat().filter(Boolean);
-          for (const item of items) {
-            // Check for matching serial in scope_name or serial fields
-            const matchesSerial = String(item.scope_name || item.serial || item.serialNumber || '') === serial;
-            const rawId = item.scope_id || item.scopeId || item._scope_id;
-            if (rawId && /^\d{10,}$/.test(String(rawId)) && (matchesSerial || items.length === 1)) {
-              numericScopeId = String(rawId);
-              break;
-            }
-          }
+        } else {
+          console.warn('[centralGetSystemInfo] no config device matched serial', serial,
+            '— scopeNames seen:', items.slice(0, 5).map(i => i.scopeName).join(', '));
         }
-      } catch (e) { console.warn('[centralGetSystemInfo] system-info list fail:', e.message); }
-    }
+      }
+    } catch (e) { console.warn('[centralGetSystemInfo] config devices lookup fail:', e.message); }
 
     console.log('[centralGetSystemInfo] numericScopeId:', numericScopeId, '| deviceName:', monData?.deviceName);
     if (!monData && !numericScopeId) return null;
