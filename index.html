@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516g -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516h -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -825,43 +825,37 @@ const liveApi = {
   },
 
   // Central: set/update device hostname via the config API.
-  // Correct endpoint: PATCH /network-config/v1alpha1/system-info?scope-id={numericId}
-  // The scope-id must be a large numeric integer — the serial string is NOT valid here.
-  // Body: { "hostname": "new-name" }   (hostname-alias defaults to sys_host_name)
+  // Endpoint: /network-config/v1alpha1/system-info?scope-id={numericId}
+  // PUT is idempotent (creates or replaces) — works whether a hostname exists or not.
+  // PATCH only works when the record already exists, so we try it as a fallback.
   async centralSetHostname({ serial, hostname, scopeId, centralToken, centralUrl }) {
     const errors = [];
     const body = { hostname };
 
-    // Attempt 1 — numeric scope_id (correct path, requires scope_id from centralGetSystemInfo)
-    if (scopeId) {
-      const url = `https://${centralUrl}/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(scopeId)}`;
-      console.log(`[centralSetHostname] PATCH (numeric scope_id=${scopeId})`, url);
-      const res = await proxyCall({ url, method: 'PATCH', token: centralToken, body });
-      const txt = !res.ok ? await res.clone().text() : '';
-      console.log('[centralSetHostname] numeric scope →', res.status, txt || 'OK');
-      if (res.ok) return res.json().catch(() => ({ success: true }));
-      errors.push(`PATCH system-info?scope-id=${scopeId} → ${res.status}: ${txt.slice(0, 200)}`);
-    } else {
-      console.warn('[centralSetHostname] no numeric scope_id available — skipping primary attempt');
+    if (!scopeId) {
+      console.warn('[centralSetHostname] no numeric scope_id available');
     }
 
-    // Attempt 2 — try POST (create) and PATCH with the hostname-alias form, numeric scope_id
+    // Try PUT → PATCH → POST in order (all on the correct system-info endpoint)
     if (scopeId) {
       const url = `https://${centralUrl}/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(scopeId)}`;
-      const bodyAlias = { hostname, 'hostname-alias': 'sys_host_name' };
-      console.log(`[centralSetHostname] POST (alias form, scope_id=${scopeId})`);
-      const res = await proxyCall({ url, method: 'POST', token: centralToken, body: bodyAlias });
-      const txt = !res.ok ? await res.clone().text() : '';
-      console.log('[centralSetHostname] POST alias →', res.status, txt || 'OK');
-      if (res.ok) return res.json().catch(() => ({ success: true }));
-      errors.push(`POST system-info?scope-id=${scopeId} (alias) → ${res.status}: ${txt.slice(0, 200)}`);
+      for (const method of ['PUT', 'PATCH', 'POST']) {
+        console.log(`[centralSetHostname] ${method} scope_id=${scopeId}`);
+        const res = await proxyCall({ url, method, token: centralToken, body });
+        const txt = !res.ok ? await res.clone().text() : '';
+        console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
+        if (res.ok) return res.json().catch(() => ({ success: true }));
+        errors.push(`${method} system-info → ${res.status}: ${txt.slice(0, 200)}`);
+        // Only continue to next method if this one returned a "not found / doesn't exist" style error
+        const isNotFound = res.status === 404 || (txt.toLowerCase().includes("doesn't exist") || txt.toLowerCase().includes('not found'));
+        if (!isNotFound) break;
+      }
     }
 
-    // Attempt 3 — fallback: try old-style management endpoints by device type (serial-based)
-    // These are less likely to work but better than nothing
+    // Last-resort fallback: legacy configuration endpoints (serial-based, older clusters)
     const fallbacks = [
-      { method: 'PATCH', path: `/configuration/v1/devices/${encodeURIComponent(serial)}`, body: { hostname } },
-      { method: 'PATCH', path: `/configuration/v2/devices/${encodeURIComponent(serial)}`, body: { hostname } },
+      { method: 'PUT',   path: `/configuration/v1/devices/${encodeURIComponent(serial)}`, body },
+      { method: 'PATCH', path: `/configuration/v1/devices/${encodeURIComponent(serial)}`, body },
     ];
     for (const { method, path, body: fb } of fallbacks) {
       try {
