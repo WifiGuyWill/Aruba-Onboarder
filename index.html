@@ -756,56 +756,153 @@ const liveApi = {
   // Central: GET device name from monitoring API. Silent failure — device may not be online yet.
   async centralGetSystemInfo({ serial, deviceType, centralToken, centralUrl }) {
     const type = (deviceType || '').toUpperCase();
-    const paths = [];
-    if (type === 'AP' || type === 'IAP') paths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
-    else if (type.includes('SWITCH'))   paths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
-    else if (type === 'GATEWAY' || type === 'GW') paths.push(`/network-monitoring/v1alpha1/gateways/${encodeURIComponent(serial)}`);
+    const monPaths = [];
+    if (type === 'AP' || type === 'IAP') monPaths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
+    else if (type.includes('SWITCH'))   monPaths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
+    else if (type === 'GATEWAY' || type === 'GW') monPaths.push(`/network-monitoring/v1alpha1/gateways/${encodeURIComponent(serial)}`);
     // Generic fallbacks
-    paths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
-    paths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
-    for (const path of [...new Set(paths)]) {
+    monPaths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
+    monPaths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
+
+    // Step 1: fetch deviceName from monitoring API (read-only)
+    let monData = null;
+    for (const path of [...new Set(monPaths)]) {
       try {
         const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
-        console.log('[centralGetSystemInfo]', path, '→', res.status);
+        console.log('[centralGetSystemInfo] monitoring', path, '→', res.status);
+        if (res.ok) {
+          monData = await res.json();
+          console.log('[centralGetSystemInfo] monitoring response:', JSON.stringify(monData));
+          break;
+        }
+      } catch (e) { console.warn('[centralGetSystemInfo] monitoring fail:', path, e.message); }
+    }
+
+    // Step 2: attempt to discover the numeric scope_id needed for config PATCH.
+    // Central's config layer uses a large integer scope_id (e.g. "73891316876853248")
+    // which is different from the serial number. Try several lookup endpoints.
+    let numericScopeId = null;
+
+    // 2a: Check if monitoring response already contains a numeric device id
+    if (monData) {
+      for (const key of ['scope_id', 'scopeId', 'uid', 'device_id']) {
+        const v = monData[key];
+        if (v && /^\d{10,}$/.test(String(v))) { numericScopeId = String(v); break; }
+      }
+    }
+
+    // 2b: Try config-layer device listing APIs if we still don't have it
+    if (!numericScopeId) {
+      const scopeLookups = [
+        `/network-config/v1alpha1/devices?serial=${encodeURIComponent(serial)}`,
+        `/network-config/v1alpha1/aps?serial=${encodeURIComponent(serial)}`,
+        `/network-config/v1alpha1/switches?serial=${encodeURIComponent(serial)}`,
+        `/network-config/v1alpha1/gateways?serial=${encodeURIComponent(serial)}`,
+      ];
+      for (const path of scopeLookups) {
+        try {
+          const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
+          console.log('[centralGetSystemInfo] scope lookup', path, '→', res.status);
+          if (!res.ok) continue;
+          const d = await res.json();
+          console.log('[centralGetSystemInfo] scope lookup response:', JSON.stringify(d).slice(0, 500));
+          // Response may be an object or an array; look for a large numeric id
+          const candidates = [d, d.devices, d.aps, d.switches, d.gateways, d.data]
+            .flat().filter(Boolean);
+          for (const item of candidates) {
+            for (const key of ['scope_id', 'scopeId', 'uid', 'id', 'device_id']) {
+              const v = item[key];
+              if (v && /^\d{10,}$/.test(String(v))) { numericScopeId = String(v); break; }
+            }
+            if (numericScopeId) break;
+          }
+          if (numericScopeId) break;
+        } catch (e) { console.warn('[centralGetSystemInfo] scope lookup fail:', path, e.message); }
+      }
+    }
+
+    // 2c: Try GET /network-config/v1alpha1/system-info — some clusters return a list
+    //     with annotations that include the numeric scope_id
+    if (!numericScopeId) {
+      try {
+        const res = await proxyCall({
+          url: `https://${centralUrl}/network-config/v1alpha1/system-info?view-type=LOCAL&detailed=true`,
+          token: centralToken,
+        });
+        console.log('[centralGetSystemInfo] system-info list GET →', res.status);
         if (res.ok) {
           const d = await res.json();
-          console.log('[centralGetSystemInfo] deviceName:', d.deviceName);
-          return d;
+          console.log('[centralGetSystemInfo] system-info list:', JSON.stringify(d).slice(0, 800));
+          // Response may include _annotations, items, or a list with scope ids
+          const items = [d, d.items, d.data, d['system-info-list']].flat().filter(Boolean);
+          for (const item of items) {
+            // Check for matching serial in scope_name or serial fields
+            const matchesSerial = String(item.scope_name || item.serial || item.serialNumber || '') === serial;
+            const rawId = item.scope_id || item.scopeId || item._scope_id;
+            if (rawId && /^\d{10,}$/.test(String(rawId)) && (matchesSerial || items.length === 1)) {
+              numericScopeId = String(rawId);
+              break;
+            }
+          }
         }
-      } catch (e) { console.warn('[centralGetSystemInfo] fail:', path, e.message); }
+      } catch (e) { console.warn('[centralGetSystemInfo] system-info list fail:', e.message); }
     }
-    return null;
+
+    console.log('[centralGetSystemInfo] numericScopeId:', numericScopeId, '| deviceName:', monData?.deviceName);
+    if (!monData && !numericScopeId) return null;
+    return { ...(monData || {}), _scopeId: numericScopeId };
   },
 
-  // Central: update device name. Monitoring API is read-only — try management/config equivalents.
-  async centralSetHostname({ serial, hostname, deviceType, centralToken, centralUrl }) {
-    const type = (deviceType || '').toUpperCase();
-    const isAP     = type === 'AP' || type === 'IAP';
-    const isSwitch = type.includes('SWITCH');
-    const isGW     = type === 'GATEWAY' || type === 'GW';
-    const attempts = [];
-    // Try management namespace (write equivalent of monitoring)
-    if (isAP)     attempts.push({ method: 'PATCH', path: `/network-management/v1alpha1/aps/${encodeURIComponent(serial)}` });
-    if (isSwitch) attempts.push({ method: 'PATCH', path: `/network-management/v1alpha1/switches/${encodeURIComponent(serial)}` });
-    if (isGW)     attempts.push({ method: 'PATCH', path: `/network-management/v1alpha1/gateways/${encodeURIComponent(serial)}` });
-    // Try PUT on monitoring path
-    if (isAP)     attempts.push({ method: 'PUT', path: `/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}` });
-    if (isSwitch) attempts.push({ method: 'PUT', path: `/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}` });
-    // Generic device endpoints
-    attempts.push({ method: 'PATCH', path: `/network-management/v1alpha1/devices/${encodeURIComponent(serial)}` });
-    attempts.push({ method: 'PATCH', path: `/network-monitoring/v1alpha1/devices/${encodeURIComponent(serial)}` });
+  // Central: set/update device hostname via the config API.
+  // Correct endpoint: PATCH /network-config/v1alpha1/system-info?scope-id={numericId}
+  // The scope-id must be a large numeric integer — the serial string is NOT valid here.
+  // Body: { "hostname": "new-name" }   (hostname-alias defaults to sys_host_name)
+  async centralSetHostname({ serial, hostname, scopeId, centralToken, centralUrl }) {
     const errors = [];
-    for (const { method, path } of attempts) {
-      console.log(`[centralSetHostname] ${method} deviceName="${hostname}" path=${path}`);
-      const res = await proxyCall({ url: `https://${centralUrl}${path}`, method, token: centralToken, body: { deviceName: hostname } });
+    const body = { hostname };
+
+    // Attempt 1 — numeric scope_id (correct path, requires scope_id from centralGetSystemInfo)
+    if (scopeId) {
+      const url = `https://${centralUrl}/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(scopeId)}`;
+      console.log(`[centralSetHostname] PATCH (numeric scope_id=${scopeId})`, url);
+      const res = await proxyCall({ url, method: 'PATCH', token: centralToken, body });
       const txt = !res.ok ? await res.clone().text() : '';
-      console.log(`[centralSetHostname] ${method} ${path} → ${res.status}`, txt ? txt.slice(0, 300) : 'OK');
+      console.log('[centralSetHostname] numeric scope →', res.status, txt || 'OK');
       if (res.ok) return res.json().catch(() => ({ success: true }));
-      // 404 = route doesn't exist, try next; anything else = route exists but failed, stop
-      if (res.status !== 404) { errors.push(`${method} ${path} → ${res.status}: ${txt.slice(0, 200)}`); break; }
-      errors.push(`${method} ${path} → 404`);
+      errors.push(`PATCH system-info?scope-id=${scopeId} → ${res.status}: ${txt.slice(0, 200)}`);
+    } else {
+      console.warn('[centralSetHostname] no numeric scope_id available — skipping primary attempt');
     }
-    throw new Error(`Device name update failed:\n${errors.join('\n')}`);
+
+    // Attempt 2 — try POST (create) and PATCH with the hostname-alias form, numeric scope_id
+    if (scopeId) {
+      const url = `https://${centralUrl}/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(scopeId)}`;
+      const bodyAlias = { hostname, 'hostname-alias': 'sys_host_name' };
+      console.log(`[centralSetHostname] POST (alias form, scope_id=${scopeId})`);
+      const res = await proxyCall({ url, method: 'POST', token: centralToken, body: bodyAlias });
+      const txt = !res.ok ? await res.clone().text() : '';
+      console.log('[centralSetHostname] POST alias →', res.status, txt || 'OK');
+      if (res.ok) return res.json().catch(() => ({ success: true }));
+      errors.push(`POST system-info?scope-id=${scopeId} (alias) → ${res.status}: ${txt.slice(0, 200)}`);
+    }
+
+    // Attempt 3 — fallback: try old-style management endpoints by device type (serial-based)
+    // These are less likely to work but better than nothing
+    const fallbacks = [
+      { method: 'PATCH', path: `/configuration/v1/devices/${encodeURIComponent(serial)}`, body: { hostname } },
+      { method: 'PATCH', path: `/configuration/v2/devices/${encodeURIComponent(serial)}`, body: { hostname } },
+    ];
+    for (const { method, path, body: fb } of fallbacks) {
+      try {
+        const res = await proxyCall({ url: `https://${centralUrl}${path}`, method, token: centralToken, body: fb });
+        const txt = !res.ok ? await res.clone().text() : '';
+        console.log(`[centralSetHostname] fallback ${method} ${path} →`, res.status, txt || 'OK');
+        if (res.ok) return res.json().catch(() => ({ success: true }));
+        if (res.status !== 404) errors.push(`${method} ${path} → ${res.status}: ${txt.slice(0, 150)}`);
+      } catch (e) { errors.push(`${method} ${path} → ${e.message}`); }
+    }
+
+    throw new Error(`Hostname update failed — numeric scope_id ${scopeId ? 'provided but rejected' : 'not found'}.\n${errors.join('\n')}`);
   },
 };
 
@@ -873,8 +970,9 @@ const demoApi = {
   async centralGetSystemInfo({ serial } = {}) {
     await delay(350);
     // Return an existing hostname only for EXIST* serials so demo mode shows the pre-fill path
-    if ((serial || '').startsWith('EXIST')) return { hostname: 'AP-existing-device' };
-    return null;
+    if ((serial || '').startsWith('EXIST')) return { deviceName: 'AP-existing-device', _scopeId: '73891316876853248' };
+    // New devices get a scope_id but no existing hostname
+    return { _scopeId: '73891316876853001' };
   },
   async centralSetHostname()   { await delay(500); return { success: true }; },
 };
@@ -2093,6 +2191,7 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
   const [hostname, setHostname] = useState('');
   const [currentHostname, setCurrentHostname] = useState(null);
   const [hostnameExists, setHostnameExists] = useState(false);
+  const [scopeId, setScopeId] = useState(null);
   const [loading, setLoading] = useState(true);
 
   const isCxSwitch = deviceType === 'SWITCH_CX' || deviceType === 'SWITCH';
@@ -2102,6 +2201,7 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
   useEffect(() => {
     api.centralGetSystemInfo({ serial, deviceType, ...settings, centralUrl })
       .then(d => {
+        if (d?._scopeId) setScopeId(d._scopeId);
         if (d?.deviceName) {
           setCurrentHostname(d.deviceName);
           setHostname(d.deviceName);
@@ -2168,7 +2268,7 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
       )}
 
       <div className="space-y-2.5 pt-1">
-        <Btn onClick={() => canSubmit && onNext({ hostname: hostname.trim(), hostnameExists })} disabled={!canSubmit || loading}>
+        <Btn onClick={() => canSubmit && onNext({ hostname: hostname.trim(), hostnameExists, scopeId })} disabled={!canSubmit || loading}>
           {currentHostname ? 'Update Hostname →' : 'Set Hostname →'}
         </Btn>
         <Btn variant="secondary" onClick={onSkip}>Skip for Now</Btn>
@@ -2245,7 +2345,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
         if (summary.hostname) {
           set('hostname', 'loading');
           try {
-            await api.centralSetHostname({ serial: summary.serial, hostname: summary.hostname, deviceType: summary.deviceType, ...settings, centralUrl });
+            await api.centralSetHostname({ serial: summary.serial, hostname: summary.hostname, scopeId: summary.hostnameScopeId, ...settings, centralUrl });
             set('hostname', 'success');
           } catch (hnErr) {
             set('hostname', 'skipped');
@@ -2617,8 +2717,8 @@ const App = () => {
           <HostnameScreen settings={liveSettings} api={api}
             deviceType={summary.deviceType}
             serial={summary.serial}
-            onNext={({ hostname, hostnameExists }) => { upd({ hostname, hostnameExists }); setScreen('review'); }}
-            onSkip={() => { upd({ hostname: null, hostnameExists: false }); setScreen('review'); }} />
+            onNext={({ hostname, hostnameExists, scopeId }) => { upd({ hostname, hostnameExists, hostnameScopeId: scopeId || null }); setScreen('review'); }}
+            onSkip={() => { upd({ hostname: null, hostnameExists: false, hostnameScopeId: null }); setScreen('review'); }} />
         )}
 
         {screen === 'review' && (
