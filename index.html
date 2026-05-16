@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516i -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516j -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -834,7 +834,7 @@ const liveApi = {
   //
   // Strategy: try PATCH first; if it fails with a "doesn't exist" error, retry
   // POST then PUT with the full alias body to create the record.
-  async centralSetHostname({ serial, hostname, scopeId, centralToken, centralUrl }) {
+  async centralSetHostname({ serial, hostname, hostnameExists, scopeId, centralToken, centralUrl }) {
     const errors = [];
 
     if (!scopeId) {
@@ -844,30 +844,27 @@ const liveApi = {
     if (scopeId) {
       const url = `https://${centralUrl}/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(scopeId)}`;
 
-      // 1. PATCH with just hostname — works when the system-info record already exists
-      console.log(`[centralSetHostname] PATCH scope_id=${scopeId}`);
-      const patchRes = await proxyCall({ url, method: 'PATCH', token: centralToken, body: { hostname } });
-      const patchTxt = !patchRes.ok ? await patchRes.clone().text() : '';
-      console.log('[centralSetHostname] PATCH →', patchRes.status, patchTxt || 'OK');
-      if (patchRes.ok) return patchRes.json().catch(() => ({ success: true }));
-      errors.push(`PATCH → ${patchRes.status}: ${patchTxt.slice(0, 200)}`);
+      if (hostnameExists) {
+        // Record already exists — PATCH { hostname } is sufficient
+        console.log(`[centralSetHostname] PATCH (existing record) scope_id=${scopeId}`);
+        const res = await proxyCall({ url, method: 'PATCH', token: centralToken, body: { hostname } });
+        const txt = !res.ok ? await res.clone().text() : '';
+        console.log('[centralSetHostname] PATCH →', res.status, txt || 'OK');
+        if (res.ok) return res.json().catch(() => ({ success: true }));
+        errors.push(`PATCH → ${res.status}: ${txt.slice(0, 200)}`);
+        // If PATCH failed unexpectedly, fall through to create attempts below
+      }
 
-      // 2. If PATCH failed (record doesn't exist yet), create it with the hostname-alias
-      //    reference so Central knows which alias holds the value.
-      const needsCreate = patchRes.status === 404
-        || patchTxt.toLowerCase().includes("doesn't exist")
-        || patchTxt.toLowerCase().includes('not found')
-        || patchTxt.toLowerCase().includes('module');
-      if (needsCreate) {
-        const createBody = { hostname, 'hostname-alias': 'sys_host_name' };
-        for (const method of ['POST', 'PUT']) {
-          console.log(`[centralSetHostname] ${method} (create with alias) scope_id=${scopeId}`);
-          const res = await proxyCall({ url, method, token: centralToken, body: createBody });
-          const txt = !res.ok ? await res.clone().text() : '';
-          console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
-          if (res.ok) return res.json().catch(() => ({ success: true }));
-          errors.push(`${method} (alias) → ${res.status}: ${txt.slice(0, 200)}`);
-        }
+      // No existing record (or PATCH failed) — must include hostname-alias to wire up
+      // the alias reference that Central uses to store the hostname value.
+      const createBody = { hostname, 'hostname-alias': 'sys_host_name' };
+      for (const method of ['POST', 'PUT', 'PATCH']) {
+        console.log(`[centralSetHostname] ${method} (create/alias) scope_id=${scopeId}`);
+        const res = await proxyCall({ url, method, token: centralToken, body: createBody });
+        const txt = !res.ok ? await res.clone().text() : '';
+        console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
+        if (res.ok) return res.json().catch(() => ({ success: true }));
+        errors.push(`${method} (alias) → ${res.status}: ${txt.slice(0, 200)}`);
       }
     }
 
@@ -2187,9 +2184,13 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
       .then(d => {
         if (d?._scopeId) setScopeId(d._scopeId);
         if (d?.deviceName) {
+          // MAC address (e.g. 3c:e8:6e:c0:77:1d) means no real hostname is configured —
+          // Central uses the MAC as a fallback display name when the system-info record
+          // doesn't exist. Show it as current but don't treat it as an existing hostname.
+          const isMac = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/i.test(d.deviceName);
           setCurrentHostname(d.deviceName);
           setHostname(d.deviceName);
-          setHostnameExists(true);
+          setHostnameExists(!isMac);
         }
         setLoading(false);
       })
@@ -2326,7 +2327,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
         if (summary.hostname) {
           set('hostname', 'loading');
           try {
-            await api.centralSetHostname({ serial: summary.serial, hostname: summary.hostname, scopeId: summary.hostnameScopeId, ...settings, centralUrl });
+            await api.centralSetHostname({ serial: summary.serial, hostname: summary.hostname, hostnameExists: summary.hostnameExists, scopeId: summary.hostnameScopeId, ...settings, centralUrl });
             set('hostname', 'success');
           } catch (hnErr) {
             set('hostname', 'skipped');
