@@ -574,7 +574,8 @@ const liveApi = {
         country,
       }],
       // contacts[].type and contacts[].name are both required by the API
-      ...(userEmail ? { contacts: [{ type: 'PRIMARY', name: userName || userEmail, email: userEmail }] } : {}),
+      // PRIMARY conflicts if the workspace already has a primary contact — use TECHNICAL instead
+      ...(userEmail ? { contacts: [{ type: 'TECHNICAL', name: userName || userEmail, email: userEmail }] } : {}),
     };
     console.log('[glCreateLocation] body:', JSON.stringify(body));
     const res = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body });
