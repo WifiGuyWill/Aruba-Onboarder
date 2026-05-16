@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516e -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516f -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2393,12 +2393,13 @@ const SuccessScreen = ({ summary, onAnother }) => (
     <Card className="space-y-0 divide-y divide-white divide-opacity-5">
       {[
         ['Serial',       summary.serial,                                  true ],
+        summary.hostname ? ['Hostname', summary.hostname,                true ] : null,
         ['Site',         summary.site?.name,                              false],
         ['Function',     summary.deviceFunction?.label,                   false],
         ['Application',  summary.application?.name,                       false],
         ['Subscription', summary.subscription?.skuDescription || 'None', false],
         ['Tags',         Object.keys(summary.tags || {}).length > 0 ? Object.entries(summary.tags).map(([k,v]) => `${k}${v?':'+v:''}`).join(', ') : 'None', false],
-      ].map(([label, value, mono]) => (
+      ].filter(Boolean).map(([label, value, mono]) => (
         <div key={label} className="flex justify-between py-3 gap-3">
           <span className="text-gray-400 text-sm">{label}</span>
           <span className={`text-white text-sm ${mono ? 'font-mono' : 'font-medium'} text-right truncate max-w-[200px]`}>{value || '—'}</span>
