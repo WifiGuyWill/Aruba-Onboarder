@@ -782,13 +782,17 @@ const liveApi = {
       { label: 'clear-alias+hostname',  body: { 'hostname-alias': '', hostname } },
     ];
     const errors = [];
-    for (const attempt of attempts) {
-      console.log(`[centralSetHostname] ${method} [${attempt.label}] serial=${serial}`);
-      const res = await proxyCall({ url, method, token: centralToken, body: attempt.body });
-      const txt = !res.ok ? await res.clone().text() : '';
-      console.log(`[centralSetHostname] ${attempt.label} → ${res.status}`, txt ? txt.slice(0, 300) : 'OK');
-      if (res.ok) return res.json().catch(() => ({ success: true }));
-      errors.push(`[${attempt.label}] ${res.status}: ${txt.slice(0, 200)}`);
+    for (let verb of [method, ...(method === 'PATCH' ? ['POST'] : [])]) {
+      for (const attempt of attempts) {
+        console.log(`[centralSetHostname] ${verb} [${attempt.label}] serial=${serial}`);
+        const res = await proxyCall({ url, method: verb, token: centralToken, body: attempt.body });
+        const txt = !res.ok ? await res.clone().text() : '';
+        console.log(`[centralSetHostname] ${verb}/${attempt.label} → ${res.status}`, txt ? txt.slice(0, 300) : 'OK');
+        if (res.ok) return res.json().catch(() => ({ success: true }));
+        errors.push(`[${verb}/${attempt.label}] ${res.status}: ${txt.slice(0, 200)}`);
+        // If not a "doesn't exist" error, no point trying other body formats
+        if (!txt.includes('doesn\'t exist') && !txt.includes('does not exist')) break;
+      }
     }
     throw new Error(`Hostname assignment failed:\n${errors.join('\n')}`);
   },
@@ -2087,8 +2091,8 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
   useEffect(() => {
     api.centralGetSystemInfo({ serial, ...settings, centralUrl })
       .then(d => {
-        if (d) {
-          // Record exists — use PATCH when setting hostname
+        if (d && Object.keys(d).length > 0) {
+          // Non-empty record exists — use PATCH when setting hostname
           setHostnameExists(true);
           // hostname-alias is the correct field; filter out the system default placeholder
           const hn = d['hostname-alias'];
