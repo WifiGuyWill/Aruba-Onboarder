@@ -777,25 +777,35 @@ const liveApi = {
     return null;
   },
 
-  // Central: PATCH device name via monitoring API (record always exists if device is in Central).
+  // Central: update device name. Monitoring API is read-only — try management/config equivalents.
   async centralSetHostname({ serial, hostname, deviceType, centralToken, centralUrl }) {
     const type = (deviceType || '').toUpperCase();
-    const paths = [];
-    if (type === 'AP' || type === 'IAP') paths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
-    else if (type.includes('SWITCH'))   paths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
-    else if (type === 'GATEWAY' || type === 'GW') paths.push(`/network-monitoring/v1alpha1/gateways/${encodeURIComponent(serial)}`);
-    paths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
-    paths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
+    const isAP     = type === 'AP' || type === 'IAP';
+    const isSwitch = type.includes('SWITCH');
+    const isGW     = type === 'GATEWAY' || type === 'GW';
+    const attempts = [];
+    // Try management namespace (write equivalent of monitoring)
+    if (isAP)     attempts.push({ method: 'PATCH', path: `/network-management/v1alpha1/aps/${encodeURIComponent(serial)}` });
+    if (isSwitch) attempts.push({ method: 'PATCH', path: `/network-management/v1alpha1/switches/${encodeURIComponent(serial)}` });
+    if (isGW)     attempts.push({ method: 'PATCH', path: `/network-management/v1alpha1/gateways/${encodeURIComponent(serial)}` });
+    // Try PUT on monitoring path
+    if (isAP)     attempts.push({ method: 'PUT', path: `/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}` });
+    if (isSwitch) attempts.push({ method: 'PUT', path: `/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}` });
+    // Generic device endpoints
+    attempts.push({ method: 'PATCH', path: `/network-management/v1alpha1/devices/${encodeURIComponent(serial)}` });
+    attempts.push({ method: 'PATCH', path: `/network-monitoring/v1alpha1/devices/${encodeURIComponent(serial)}` });
     const errors = [];
-    for (const path of [...new Set(paths)]) {
-      console.log(`[centralSetHostname] PATCH deviceName="${hostname}" path=${path}`);
-      const res = await proxyCall({ url: `https://${centralUrl}${path}`, method: 'PATCH', token: centralToken, body: { deviceName: hostname } });
+    for (const { method, path } of attempts) {
+      console.log(`[centralSetHostname] ${method} deviceName="${hostname}" path=${path}`);
+      const res = await proxyCall({ url: `https://${centralUrl}${path}`, method, token: centralToken, body: { deviceName: hostname } });
       const txt = !res.ok ? await res.clone().text() : '';
-      console.log(`[centralSetHostname] ${path} → ${res.status}`, txt ? txt.slice(0, 300) : 'OK');
+      console.log(`[centralSetHostname] ${method} ${path} → ${res.status}`, txt ? txt.slice(0, 300) : 'OK');
       if (res.ok) return res.json().catch(() => ({ success: true }));
-      errors.push(`${res.status}: ${txt.slice(0, 200)}`);
+      // 404 = route doesn't exist, try next; anything else = route exists but failed, stop
+      if (res.status !== 404) { errors.push(`${method} ${path} → ${res.status}: ${txt.slice(0, 200)}`); break; }
+      errors.push(`${method} ${path} → 404`);
     }
-    throw new Error(`Device name update failed: ${errors.join(' | ')}`);
+    throw new Error(`Device name update failed:\n${errors.join('\n')}`);
   },
 };
 
