@@ -534,26 +534,49 @@ const liveApi = {
 
   // GreenLake: create location
   async glCreateLocation({ name, address, token }) {
-    // Extract user email from the JWT sub claim — used for the required Contacts array.
-    let userEmail = '';
+    // ISO 3166-1 alpha-2 → full country name as expected by the GL locations API
+    // (GET returns full names like "United States"; POST ValidateCountry rejects codes)
+    const COUNTRY_NAMES = {
+      US:'United States',GB:'United Kingdom',CA:'Canada',AU:'Australia',DE:'Germany',
+      FR:'France',NL:'Netherlands',SE:'Sweden',NO:'Norway',DK:'Denmark',FI:'Finland',
+      CH:'Switzerland',AT:'Austria',BE:'Belgium',IE:'Ireland',ES:'Spain',IT:'Italy',
+      PT:'Portugal',PL:'Poland',CZ:'Czechia',HU:'Hungary',RO:'Romania',BG:'Bulgaria',
+      HR:'Croatia',SK:'Slovakia',SI:'Slovenia',LT:'Lithuania',LV:'Latvia',EE:'Estonia',
+      JP:'Japan',CN:'China',KR:'South Korea',IN:'India',SG:'Singapore',HK:'Hong Kong',
+      TW:'Taiwan',MY:'Malaysia',TH:'Thailand',PH:'Philippines',ID:'Indonesia',VN:'Vietnam',
+      NZ:'New Zealand',ZA:'South Africa',BR:'Brazil',MX:'Mexico',AR:'Argentina',CL:'Chile',
+      CO:'Colombia',PE:'Peru',AE:'United Arab Emirates',SA:'Saudi Arabia',IL:'Israel',
+      TR:'Turkey',EG:'Egypt',NG:'Nigeria',KE:'Kenya',GH:'Ghana',PK:'Pakistan',BD:'Bangladesh',
+    };
+    // Accept either ISO code ("US") or full name ("United States") — normalise to full name
+    const rawCountry = (address.country || '').trim();
+    const country = COUNTRY_NAMES[rawCountry.toUpperCase()] || rawCountry;
+
+    // Decode JWT to get user email + derive a display name for the required Contacts array
+    let userEmail = '', userName = '';
     try {
       const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
       userEmail = payload.sub || payload.email || '';
-    } catch (e) { /* ignore — contacts will be omitted if unparseable */ }
+      // Try first/last name claims; fall back to the email local-part
+      const first = payload.given_name || payload.firstName || '';
+      const last  = payload.family_name || payload.lastName  || '';
+      userName = (first + ' ' + last).trim() || (userEmail.split('@')[0] || 'User').replace(/[._-]/g, ' ');
+    } catch (e) { /* ignore */ }
 
     const body = {
       name,
       addresses: [{
-        type:          'SHIPPING',           // required by API
-        streetaddress: address.street  || '',
-        city:          address.city    || '',
-        state:         address.state   || '',
-        postalCode:    address.zip     || '',
-        country:       address.country || '', // must be ISO 3166-1 alpha-2 (e.g. "US")
+        type:          'SHIPPING',
+        streetaddress: address.street || '',
+        city:          address.city   || '',
+        state:         address.state  || '',
+        postalCode:    address.zip    || '',
+        country,
       }],
-      // Contacts array is required — use the authenticated user's email from the JWT
-      ...(userEmail ? { contacts: [{ contactType: 'PRIMARY', email: userEmail }] } : {}),
+      // contacts[].type and contacts[].name are both required by the API
+      ...(userEmail ? { contacts: [{ type: 'PRIMARY', name: userName || userEmail, email: userEmail }] } : {}),
     };
+    console.log('[glCreateLocation] body:', JSON.stringify(body));
     const res = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body });
     if (!res.ok) throw new Error(`Create location error ${res.status}: ${await res.text()}`);
     return res.json();
@@ -1895,7 +1918,7 @@ const LocationScreen = ({ settings, api, onNext, initialId }) => {
             <TextInput label="Postal Code" value={newLoc.zip} onChange={setNL('zip')} placeholder="EC1A 1BB" />
             <TextInput label="Country (ISO code)" value={newLoc.country} onChange={v => setNL('country')(v.toUpperCase().slice(0, 2))} placeholder="US" />
           </div>
-          <p className="text-gray-600 text-xs -mt-1">Country must be a 2-letter ISO code (US, GB, AU…)</p>
+          <p className="text-gray-600 text-xs -mt-1">2-letter code (US, GB, AU) or full name</p>
           {createErr && <p className="text-red-400 text-xs">{createErr}</p>}
           <Btn onClick={handleCreate} disabled={!newLoc.name.trim() || creating}>
             {creating ? 'Creating…' : 'Create Location'}
