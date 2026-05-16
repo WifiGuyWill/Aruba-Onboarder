@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516h -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516i -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -826,29 +826,48 @@ const liveApi = {
 
   // Central: set/update device hostname via the config API.
   // Endpoint: /network-config/v1alpha1/system-info?scope-id={numericId}
-  // PUT is idempotent (creates or replaces) — works whether a hostname exists or not.
-  // PATCH only works when the record already exists, so we try it as a fallback.
+  //
+  // Two cases:
+  //   Record exists   → PATCH { hostname } works (alias reference already in place)
+  //   Record missing  → POST/PUT alone silently no-ops; must include hostname-alias
+  //                     to tell Central which alias stores the value.
+  //
+  // Strategy: try PATCH first; if it fails with a "doesn't exist" error, retry
+  // POST then PUT with the full alias body to create the record.
   async centralSetHostname({ serial, hostname, scopeId, centralToken, centralUrl }) {
     const errors = [];
-    const body = { hostname };
 
     if (!scopeId) {
       console.warn('[centralSetHostname] no numeric scope_id available');
     }
 
-    // Try PUT → PATCH → POST in order (all on the correct system-info endpoint)
     if (scopeId) {
       const url = `https://${centralUrl}/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(scopeId)}`;
-      for (const method of ['PUT', 'PATCH', 'POST']) {
-        console.log(`[centralSetHostname] ${method} scope_id=${scopeId}`);
-        const res = await proxyCall({ url, method, token: centralToken, body });
-        const txt = !res.ok ? await res.clone().text() : '';
-        console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
-        if (res.ok) return res.json().catch(() => ({ success: true }));
-        errors.push(`${method} system-info → ${res.status}: ${txt.slice(0, 200)}`);
-        // Only continue to next method if this one returned a "not found / doesn't exist" style error
-        const isNotFound = res.status === 404 || (txt.toLowerCase().includes("doesn't exist") || txt.toLowerCase().includes('not found'));
-        if (!isNotFound) break;
+
+      // 1. PATCH with just hostname — works when the system-info record already exists
+      console.log(`[centralSetHostname] PATCH scope_id=${scopeId}`);
+      const patchRes = await proxyCall({ url, method: 'PATCH', token: centralToken, body: { hostname } });
+      const patchTxt = !patchRes.ok ? await patchRes.clone().text() : '';
+      console.log('[centralSetHostname] PATCH →', patchRes.status, patchTxt || 'OK');
+      if (patchRes.ok) return patchRes.json().catch(() => ({ success: true }));
+      errors.push(`PATCH → ${patchRes.status}: ${patchTxt.slice(0, 200)}`);
+
+      // 2. If PATCH failed (record doesn't exist yet), create it with the hostname-alias
+      //    reference so Central knows which alias holds the value.
+      const needsCreate = patchRes.status === 404
+        || patchTxt.toLowerCase().includes("doesn't exist")
+        || patchTxt.toLowerCase().includes('not found')
+        || patchTxt.toLowerCase().includes('module');
+      if (needsCreate) {
+        const createBody = { hostname, 'hostname-alias': 'sys_host_name' };
+        for (const method of ['POST', 'PUT']) {
+          console.log(`[centralSetHostname] ${method} (create with alias) scope_id=${scopeId}`);
+          const res = await proxyCall({ url, method, token: centralToken, body: createBody });
+          const txt = !res.ok ? await res.clone().text() : '';
+          console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
+          if (res.ok) return res.json().catch(() => ({ success: true }));
+          errors.push(`${method} (alias) → ${res.status}: ${txt.slice(0, 200)}`);
+        }
       }
     }
 
