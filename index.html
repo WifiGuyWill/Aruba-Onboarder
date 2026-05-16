@@ -752,6 +752,32 @@ const liveApi = {
       : `Function assignment failed (all formats rejected — assign manually in Aruba Central):\n${errors.map(e => e.slice(0, 200)).join('\n')}`;
     throw Object.assign(new Error(softMsg), { softFail: true });
   },
+
+  // Central: GET current system info (hostname). Silent failure — device may not be in Central yet.
+  async centralGetSystemInfo({ serial, centralToken, centralUrl }) {
+    const url = `https://${centralUrl}/network-config/v1alpha1/system-info?serial=${encodeURIComponent(serial)}`;
+    try {
+      const res = await proxyCall({ url, token: centralToken });
+      console.log('[centralGetSystemInfo] →', res.status);
+      if (!res.ok) return null;
+      const d = await res.json();
+      console.log('[centralGetSystemInfo] response:', JSON.stringify(d).slice(0, 300));
+      return d;
+    } catch (e) {
+      console.warn('[centralGetSystemInfo] silent fail:', e.message);
+      return null;
+    }
+  },
+
+  // Central: POST (create) or PATCH (update) hostname via system-info endpoint.
+  async centralSetHostname({ serial, hostname, hostnameExists, centralToken, centralUrl }) {
+    const url = `https://${centralUrl}/network-config/v1alpha1/system-info?serial=${encodeURIComponent(serial)}`;
+    const method = hostnameExists ? 'PATCH' : 'POST';
+    console.log(`[centralSetHostname] ${method} hostname="${hostname}" serial=${serial}`);
+    const res = await proxyCall({ url, method, token: centralToken, body: { hostname } });
+    if (!res.ok) throw new Error(`Hostname ${method} error ${res.status}: ${await res.text()}`);
+    return res.json().catch(() => ({ success: true }));
+  },
 };
 
 // ── DEMO API ───────────────────────────────────────────────────────────────────
@@ -815,6 +841,13 @@ const demoApi = {
   ]; },
   async centralAssignSite()    { await delay(800); return { success: true }; },
   async centralAssignFunction(){ await delay(600); return { success: true }; },
+  async centralGetSystemInfo({ serial } = {}) {
+    await delay(350);
+    // Return an existing hostname only for EXIST* serials so demo mode shows the pre-fill path
+    if ((serial || '').startsWith('EXIST')) return { hostname: 'AP-existing-device' };
+    return null;
+  },
+  async centralSetHostname()   { await delay(500); return { success: true }; },
 };
 
 // ── BARCODE PARSER ─────────────────────────────────────────────────────────────
@@ -2026,6 +2059,89 @@ const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
 };
 
 // ── SCREEN: REVIEW ────────────────────────────────────────────────────────────
+// ── SCREEN: HOSTNAME (optional) ───────────────────────────────────────────────
+const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) => {
+  const [hostname, setHostname] = useState('');
+  const [currentHostname, setCurrentHostname] = useState(null);
+  const [hostnameExists, setHostnameExists] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  const isCxSwitch = deviceType === 'SWITCH_CX' || deviceType === 'SWITCH';
+  const maxLen = isCxSwitch ? 32 : 128;
+  const centralUrl = CLUSTERS.find(c => c.id === settings.centralCluster)?.url || CLUSTERS[0].url;
+
+  useEffect(() => {
+    api.centralGetSystemInfo({ serial, ...settings, centralUrl })
+      .then(d => {
+        if (d?.hostname) {
+          setCurrentHostname(d.hostname);
+          setHostname(d.hostname);
+          setHostnameExists(true);
+        }
+        setLoading(false);
+      })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const validationError = (() => {
+    if (!hostname) return '';
+    if (!/^[a-zA-Z0-9-]+$/.test(hostname)) return 'Only letters, numbers, and dashes allowed';
+    if (hostname.length > maxLen) return `Max ${maxLen} characters for ${isCxSwitch ? 'CX switches' : 'this device'}`;
+    return '';
+  })();
+
+  const canSubmit = hostname.trim().length > 0 && !validationError;
+
+  return (
+    <div className="p-5 space-y-4 step-enter">
+      <div className="pt-2">
+        <h2 className="text-white font-bold text-xl">Hostname <span className="text-gray-500 font-normal text-base">— optional</span></h2>
+        <p className="text-gray-400 text-sm">Set a name for this device in Aruba Central</p>
+      </div>
+
+      {loading ? <Spinner /> : (
+        <>
+          {currentHostname && (
+            <div className="flex items-center gap-2 bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3">
+              <span className="text-gray-500 text-xs shrink-0">Current:</span>
+              <span className="text-white text-sm font-mono">{currentHostname}</span>
+            </div>
+          )}
+          <div className="space-y-1.5">
+            <input
+              value={hostname}
+              onChange={e => setHostname(e.target.value)}
+              placeholder="e.g. AP-lobby-floor2"
+              maxLength={maxLen}
+              autoCapitalize="none"
+              autoCorrect="off"
+              className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm font-mono"
+            />
+            <div className="flex justify-between items-center px-1">
+              {validationError
+                ? <p className="text-red-400 text-xs">{validationError}</p>
+                : <p className="text-gray-600 text-xs">Letters, numbers, and dashes only</p>
+              }
+              {isCxSwitch && (
+                <p className={`text-xs shrink-0 ${hostname.length > maxLen * 0.85 ? 'text-amber-400' : 'text-gray-600'}`}>
+                  {hostname.length}/{maxLen}
+                </p>
+              )}
+            </div>
+          </div>
+        </>
+      )}
+
+      <div className="space-y-2.5 pt-1">
+        <Btn onClick={() => canSubmit && onNext({ hostname: hostname.trim(), hostnameExists })} disabled={!canSubmit || loading}>
+          {currentHostname ? 'Update Hostname →' : 'Set Hostname →'}
+        </Btn>
+        <Btn variant="secondary" onClick={onSkip}>Skip for Now</Btn>
+      </div>
+    </div>
+  );
+};
+
 const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
   const isUxi = summary.deviceType === 'UXI';
   const [submitting, setSubmitting] = useState(false);
@@ -2034,6 +2150,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
     application: 'pending',
     site: isUxi ? 'skipped' : 'pending',
     function: (isUxi || !summary.deviceFunction) ? 'skipped' : 'pending',
+    hostname: (isUxi || !summary.hostname) ? 'skipped' : 'pending',
   });
   const [errorMsg, setErrorMsg] = useState('');
   const set = (k, v) => setStepStatus(p => ({ ...p, [k]: v }));
@@ -2090,6 +2207,16 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
             }
           }
         }
+        if (summary.hostname) {
+          set('hostname', 'loading');
+          try {
+            await api.centralSetHostname({ serial: summary.serial, hostname: summary.hostname, hostnameExists: summary.hostnameExists, ...settings, centralUrl });
+            set('hostname', 'success');
+          } catch (hnErr) {
+            set('hostname', 'skipped');
+            setErrorMsg(prev => [prev, 'Hostname could not be set — assign manually in Aruba Central'].filter(Boolean).join('\n'));
+          }
+        }
       }
       setTimeout(onDone, 600);
     } catch (err) {
@@ -2114,6 +2241,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
     { label: 'Region',       value: summary.application?.regionName || regionLabel(summary.applicationRegion) },
     { label: 'Site',         value: summary.site?.name,                     step: 'site' },
     { label: 'Function',     value: summary.deviceFunction?.label,          step: 'function' },
+    { label: 'Hostname',     value: summary.hostname,                       step: 'hostname' },
   ];
 
   return (
@@ -2445,15 +2573,23 @@ const App = () => {
             initialId={localStorage.getItem('aruba_last_function')}
             onSelect={fn => {
               localStorage.setItem('aruba_last_function', fn.id);
-              upd({ deviceFunction: fn }); setScreen('review');
+              upd({ deviceFunction: fn }); setScreen('hostname');
             }}
-            onSkip={() => { upd({ deviceFunction: null }); setScreen('review'); }} />
+            onSkip={() => { upd({ deviceFunction: null }); setScreen('hostname'); }} />
+        )}
+
+        {screen === 'hostname' && (
+          <HostnameScreen settings={liveSettings} api={api}
+            deviceType={summary.deviceType}
+            serial={summary.serial}
+            onNext={({ hostname, hostnameExists }) => { upd({ hostname, hostnameExists }); setScreen('review'); }}
+            onSkip={() => { upd({ hostname: null, hostnameExists: false }); setScreen('review'); }} />
         )}
 
         {screen === 'review' && (
           <ReviewScreen summary={summary} settings={liveSettings} api={api}
             onDone={() => setScreen('success')}
-            onBack={() => setScreen(summary.deviceType === 'UXI' ? 'application' : 'function')} />
+            onBack={() => setScreen(summary.deviceType === 'UXI' ? 'application' : 'hostname')} />
         )}
 
         {screen === 'success' && (
