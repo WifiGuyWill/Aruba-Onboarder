@@ -1769,7 +1769,7 @@ const TagsScreen = ({ settings, api, onNext, initialTags }) => {
 
       <div className="space-y-2.5 pt-1">
         <Btn onClick={() => onNext(selected)} disabled={selectedCount === 0 || loading}>
-          {`Add ${selectedCount} Tag${selectedCount !== 1 ? 's' : ''} →`}
+          {`Update Tags (${selectedCount}) →`}
         </Btn>
         <Btn variant="secondary" onClick={() => onNext({})}>Skip for Now</Btn>
       </div>
@@ -1792,6 +1792,12 @@ const LocationScreen = ({ settings, api, onNext, initialId }) => {
   useEffect(() => {
     api.glGetLocations(settings)
       .then(locs => {
+        // Currently assigned location sorts first
+        if (initialId) locs.sort((a, b) => {
+          if (String(a.id) === String(initialId)) return -1;
+          if (String(b.id) === String(initialId)) return 1;
+          return 0;
+        });
         setLocations(locs);
         if (initialId) {
           const match = locs.find(l => String(l.id) === String(initialId));
@@ -2225,6 +2231,12 @@ const ApplicationScreen = ({ settings, api, onSelect, deviceType, initialId }) =
           if (isUxi) return name.includes('uxi');
           return name.includes('central') || name.includes('aruba networking');
         });
+        // Currently assigned application sorts first
+        if (initialId) filtered.sort((a, b) => {
+          if (String(a.id) === String(initialId)) return -1;
+          if (String(b.id) === String(initialId)) return 1;
+          return 0;
+        });
         setApps(filtered);
         setLoading(false);
         // Pre-select by current application ID if provided (existing device),
@@ -2294,6 +2306,12 @@ const SiteScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
   useEffect(() => {
     api.centralGetSites(settings)
       .then(d => {
+        // Currently assigned site sorts first
+        if (initialId) d.sort((a, b) => {
+          if (String(a.id) === String(initialId)) return -1;
+          if (String(b.id) === String(initialId)) return 1;
+          return 0;
+        });
         setSites(d);
         if (initialId) {
           const match = d.find(s => String(s.id) === String(initialId));
@@ -2356,7 +2374,14 @@ const SiteScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
 // ── SCREEN: DEVICE FUNCTION ───────────────────────────────────────────────────
 const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
   const allowed = deviceType ? (PERSONA_BY_DEVICE_TYPE[deviceType] || DEVICE_FUNCTIONS.map(f => f.id)) : DEVICE_FUNCTIONS.map(f => f.id);
-  const filtered = DEVICE_FUNCTIONS.filter(fn => allowed.includes(fn.id));
+  const filtered = DEVICE_FUNCTIONS
+    .filter(fn => allowed.includes(fn.id))
+    // Currently assigned function sorts first
+    .sort((a, b) => {
+      if (initialId && a.id === initialId) return -1;
+      if (initialId && b.id === initialId) return 1;
+      return 0;
+    });
   const [selected, setSelected] = useState(() => initialId ? (filtered.find(fn => fn.id === initialId) || null) : null);
 
   // Reactive pre-population: background Central lookup may complete after mount
