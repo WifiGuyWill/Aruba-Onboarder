@@ -773,8 +773,8 @@ const liveApi = {
   async centralSetHostname({ serial, hostname, hostnameExists, centralToken, centralUrl }) {
     const url = `https://${centralUrl}/network-config/v1alpha1/system-info?serial=${encodeURIComponent(serial)}`;
     const method = hostnameExists ? 'PATCH' : 'POST';
-    console.log(`[centralSetHostname] ${method} hostname="${hostname}" serial=${serial}`);
-    const res = await proxyCall({ url, method, token: centralToken, body: { hostname } });
+    console.log(`[centralSetHostname] ${method} hostname-alias="${hostname}" serial=${serial}`);
+    const res = await proxyCall({ url, method, token: centralToken, body: { 'hostname-alias': hostname } });
     if (!res.ok) throw new Error(`Hostname ${method} error ${res.status}: ${await res.text()}`);
     return res.json().catch(() => ({ success: true }));
   },
@@ -2073,10 +2073,15 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
   useEffect(() => {
     api.centralGetSystemInfo({ serial, ...settings, centralUrl })
       .then(d => {
-        if (d?.hostname) {
-          setCurrentHostname(d.hostname);
-          setHostname(d.hostname);
+        if (d) {
+          // Record exists — use PATCH when setting hostname
           setHostnameExists(true);
+          // hostname-alias is the correct field; filter out the system default placeholder
+          const hn = d['hostname-alias'];
+          if (hn && hn !== 'sys_host_name') {
+            setCurrentHostname(hn);
+            setHostname(hn);
+          }
         }
         setLoading(false);
       })
