@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516j -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516k -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -843,28 +843,21 @@ const liveApi = {
 
     if (scopeId) {
       const url = `https://${centralUrl}/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(scopeId)}`;
+      // Always include hostname-alias so Central knows which alias stores the value.
+      // This is a no-op when the alias already exists (update case) and required
+      // when the alias was removed (e.g. hostname deleted via Central UI).
+      const body = { hostname, 'hostname-alias': 'sys_host_name' };
 
-      if (hostnameExists) {
-        // Record already exists — PATCH { hostname } is sufficient
-        console.log(`[centralSetHostname] PATCH (existing record) scope_id=${scopeId}`);
-        const res = await proxyCall({ url, method: 'PATCH', token: centralToken, body: { hostname } });
-        const txt = !res.ok ? await res.clone().text() : '';
-        console.log('[centralSetHostname] PATCH →', res.status, txt || 'OK');
-        if (res.ok) return res.json().catch(() => ({ success: true }));
-        errors.push(`PATCH → ${res.status}: ${txt.slice(0, 200)}`);
-        // If PATCH failed unexpectedly, fall through to create attempts below
-      }
-
-      // No existing record (or PATCH failed) — must include hostname-alias to wire up
-      // the alias reference that Central uses to store the hostname value.
-      const createBody = { hostname, 'hostname-alias': 'sys_host_name' };
-      for (const method of ['POST', 'PUT', 'PATCH']) {
-        console.log(`[centralSetHostname] ${method} (create/alias) scope_id=${scopeId}`);
-        const res = await proxyCall({ url, method, token: centralToken, body: createBody });
+      // Try PATCH first (update existing record), then PUT, then POST
+      for (const method of ['PATCH', 'PUT', 'POST']) {
+        console.log(`[centralSetHostname] ${method} scope_id=${scopeId}`);
+        const res = await proxyCall({ url, method, token: centralToken, body });
         const txt = !res.ok ? await res.clone().text() : '';
         console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
         if (res.ok) return res.json().catch(() => ({ success: true }));
-        errors.push(`${method} (alias) → ${res.status}: ${txt.slice(0, 200)}`);
+        // "already exists" on POST means record is there — don't retry further
+        if (method === 'POST' && txt.includes('already exists')) break;
+        errors.push(`${method} → ${res.status}: ${txt.slice(0, 200)}`);
       }
     }
 
