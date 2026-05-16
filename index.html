@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516d -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516e -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2202,12 +2202,9 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
       {loading ? <Spinner /> : (
         <>
           {currentHostname && (
-            <div className="space-y-1">
-              <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider px-1">Current Hostname</p>
-              <div className="flex items-center gap-2 bg-white bg-opacity-3 border border-white border-opacity-5 rounded-xl px-4 py-3">
-                <span className="text-gray-500 text-sm font-mono">{currentHostname}</span>
-                <span className="text-gray-700 text-xs ml-auto">read-only</span>
-              </div>
+            <div className="flex items-center gap-2 px-1">
+              <p className="text-gray-500 text-xs font-semibold uppercase tracking-wider shrink-0">Current</p>
+              <p className="text-gray-400 text-sm font-mono truncate">{currentHostname}</p>
             </div>
           )}
           <div className="space-y-1.5">
