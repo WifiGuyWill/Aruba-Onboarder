@@ -1888,53 +1888,23 @@ const LocationScreen = ({ settings, api, onNext, initialId }) => {
         <p className="text-gray-400 text-sm">Associate a GreenLake location with this device</p>
       </div>
 
-      <div className="flex bg-white bg-opacity-5 rounded-xl p-1 gap-1">
-        {[['list','📋  Pick Existing'],['create','➕  Create New']].map(([m, lbl]) => (
-          <button key={m} onClick={() => setMode(m)}
-            className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${mode === m ? 'bg-emerald-500 text-white' : 'text-gray-400'}`}>
-            {lbl}
-          </button>
-        ))}
-      </div>
-
-      {mode === 'list' ? (
-        <>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search locations…"
-            className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
-          {loading ? <Spinner /> : (
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {filtered.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No locations found</p>}
-              {filtered.map(loc => (
-                <button key={loc.id} onClick={() => setSelected(s => s?.id === loc.id ? null : loc)}
-                  className={`w-full text-left p-4 rounded-2xl border transition-all ${
-                    selected?.id === loc.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
-                    : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
-                  <p className="text-white font-medium text-sm">{loc.name}</p>
-                  {loc.city && <p className="text-gray-500 text-xs mt-0.5">{[loc.city, loc.country].filter(Boolean).join(', ')}</p>}
-                  {selected?.id === loc.id && <p className="text-emerald-400 text-xs mt-1">{initialId && String(initialId) === String(loc.id) ? '✓ Currently assigned' : '✓ Selected'}</p>}
-                </button>
-              ))}
-            </div>
-          )}
-        </>
-      ) : (
-        <Card className="space-y-3">
-          <TextInput label="Location Name" value={newLoc.name} onChange={setNL('name')} placeholder="e.g. London Office – Floor 3" />
-          <TextInput label="Street Address" value={newLoc.street} onChange={setNL('street')} placeholder="123 Main St" />
-          <div className="grid grid-cols-2 gap-3">
-            <TextInput label="City" value={newLoc.city} onChange={setNL('city')} placeholder="London" />
-            <TextInput label="State / Region" value={newLoc.state} onChange={setNL('state')} placeholder="ENG" />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <TextInput label="Postal Code" value={newLoc.zip} onChange={setNL('zip')} placeholder="EC1A 1BB" />
-            <TextInput label="Country (ISO code)" value={newLoc.country} onChange={v => setNL('country')(v.toUpperCase().slice(0, 2))} placeholder="US" />
-          </div>
-          <p className="text-gray-600 text-xs -mt-1">2-letter code (US, GB, AU) or full name</p>
-          {createErr && <p className="text-red-400 text-xs">{createErr}</p>}
-          <Btn onClick={handleCreate} disabled={!newLoc.name.trim() || creating}>
-            {creating ? 'Creating…' : 'Create Location'}
-          </Btn>
-        </Card>
+      {/* Tab switcher + create form hidden until API is resolved — code preserved below */}
+      <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search locations…"
+        className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
+      {loading ? <Spinner /> : (
+        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+          {filtered.length === 0 && <p className="text-gray-500 text-sm text-center py-4">No locations found</p>}
+          {filtered.map(loc => (
+            <button key={loc.id} onClick={() => setSelected(s => s?.id === loc.id ? null : loc)}
+              className={`w-full text-left p-4 rounded-2xl border transition-all ${
+                selected?.id === loc.id ? 'bg-emerald-500 bg-opacity-10 border-emerald-500 border-opacity-40'
+                : 'bg-white bg-opacity-5 border-white border-opacity-10'}`}>
+              <p className="text-white font-medium text-sm">{loc.name}</p>
+              {loc.city && <p className="text-gray-500 text-xs mt-0.5">{[loc.city, loc.country].filter(Boolean).join(', ')}</p>}
+              {selected?.id === loc.id && <p className="text-emerald-400 text-xs mt-1">{initialId && String(initialId) === String(loc.id) ? '✓ Currently assigned' : '✓ Selected'}</p>}
+            </button>
+          ))}
+        </div>
       )}
 
       <div className="space-y-2.5 pt-1">
