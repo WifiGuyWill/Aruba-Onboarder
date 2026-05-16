@@ -1931,10 +1931,17 @@ const ContactScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
     }
   }, [initialId, users]);
 
-  const filtered = users.filter(u => {
-    const q = search.toLowerCase();
-    return userName(u).toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q);
-  });
+  const filtered = users
+    .filter(u => {
+      const q = search.toLowerCase();
+      return userName(u).toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q);
+    })
+    // Currently assigned contact appears first
+    .sort((a, b) => {
+      if (initialId && String(a.id) === String(initialId)) return -1;
+      if (initialId && String(b.id) === String(initialId)) return 1;
+      return 0;
+    });
 
   const handleCreate = async () => {
     if (!newUser.email.trim()) return;
@@ -2104,6 +2111,12 @@ const SubscriptionScreen = ({ settings, api, onSelect, onSkip, deviceType, initi
     api.glGetSubscriptions(settings)
       .then(d => {
         const filtered = filterSubscriptions(d, deviceType);
+        // Currently assigned subscription appears first
+        if (initialKey) filtered.sort((a, b) => {
+          if (a.key === initialKey) return -1;
+          if (b.key === initialKey) return 1;
+          return 0;
+        });
         setSubs(filtered);
         if (initialKey) {
           const match = filtered.find(s => s.key === initialKey);
@@ -2485,7 +2498,13 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
 const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
   const isUxi = summary.deviceType === 'UXI';
   const [submitting, setSubmitting] = useState(false);
-  const hasTags = Object.keys(summary.tags || {}).length > 0;
+  // Compute tag patch: additions/changes from summary.tags PLUS null-deletions for any
+  // tags that were on the device (currentTags) but the user removed during this session.
+  const tagPatch = { ...(summary.tags || {}) };
+  Object.keys(summary.currentTags || {}).forEach(k => {
+    if (tagPatch[k] === undefined) tagPatch[k] = null; // null = delete on v2beta1 PATCH
+  });
+  const hasTags = Object.keys(tagPatch).length > 0;
   const hasContact = !!summary.contact;
   const [stepStatus, setStepStatus] = useState({
     attributes: (hasTags || hasContact) ? 'pending' : 'skipped',
@@ -2527,7 +2546,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
       // Apply tags + contact via a single PATCH — always run if either is set
       if (hasTags || hasContact) {
         await assignStep('attributes', () =>
-          api.glPatchAttributes({ deviceId: summary.deviceId, tags: summary.tags, contact: summary.contact, ...settings })
+          api.glPatchAttributes({ deviceId: summary.deviceId, tags: tagPatch, contact: summary.contact, ...settings })
         );
       }
 
@@ -2599,7 +2618,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
   const rows = [
     { label: 'Serial',       value: summary.serial,                         mono: true },
     { label: 'MAC',          value: summary.mac,                            mono: true },
-    { label: 'Tags',         value: Object.keys(summary.tags || {}).length > 0 ? `${Object.keys(summary.tags).length} tag(s)` : 'None', step: (hasTags || hasContact) ? 'attributes' : null },
+    { label: 'Tags',         value: (() => { const adds = Object.values(tagPatch).filter(v => v !== null).length; const dels = Object.values(tagPatch).filter(v => v === null).length; return adds > 0 || dels > 0 ? `${adds} tag${adds !== 1 ? 's' : ''}${dels > 0 ? ` (−${dels} removed)` : ''}` : 'None'; })(), step: (hasTags || hasContact) ? 'attributes' : null },
     { label: 'Location',     value: summary.location?.name || 'None' },
     { label: 'Contact',      value: summary.contact ? `${userName(summary.contact)}${summary.contact.email ? ` — ${summary.contact.email}` : ''}` : 'None', step: (hasTags || hasContact) ? 'attributes' : null },
     { label: 'Subscription', value: summary.subscription?.skuDescription || 'Skip', step: 'subscription' },
