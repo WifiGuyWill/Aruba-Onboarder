@@ -563,24 +563,34 @@ const liveApi = {
       userName = (first + ' ' + last).trim() || (userEmail.split('@')[0] || 'User').replace(/[._-]/g, ' ');
     } catch (e) { /* ignore */ }
 
-    const body = {
-      name,
-      addresses: [{
-        type:          'SHIPPING',
-        streetaddress: address.street || '',
-        city:          address.city   || '',
-        state:         address.state  || '',
-        postalCode:    address.zip    || '',
-        country,
-      }],
-      // contacts[].type and contacts[].name are both required by the API
-      // PRIMARY conflicts if the workspace already has a primary contact — use TECHNICAL instead
-      ...(userEmail ? { contacts: [{ type: 'TECHNICAL', name: userName || userEmail, email: userEmail }] } : {}),
+    const addressObj = {
+      type:          'SHIPPING',
+      streetaddress: address.street || '',
+      city:          address.city   || '',
+      state:         address.state  || '',
+      postalCode:    address.zip    || '',
+      country,
     };
-    console.log('[glCreateLocation] body:', JSON.stringify(body));
-    const res = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body });
-    if (!res.ok) throw new Error(`Create location error ${res.status}: ${await res.text()}`);
-    return res.json();
+
+    // Attempt 1: without contacts — workspace may already have a primary contact and
+    // reject any additional contact entry (409 conflict). Skip contacts first.
+    const bodyNoContacts = { name, addresses: [addressObj] };
+    console.log('[glCreateLocation] attempt 1 (no contacts):', JSON.stringify(bodyNoContacts));
+    const res1 = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body: bodyNoContacts });
+    if (res1.ok) return res1.json();
+    const err1 = await res1.text();
+    console.log('[glCreateLocation] attempt 1 failed:', res1.status, err1.slice(0, 200));
+
+    // Attempt 2: with contacts — some workspaces require the contacts field
+    if (userEmail) {
+      const bodyWithContacts = { name, addresses: [addressObj], contacts: [{ type: 'TECHNICAL', name: userName || userEmail, email: userEmail }] };
+      console.log('[glCreateLocation] attempt 2 (with contacts):', JSON.stringify(bodyWithContacts));
+      const res2 = await proxyCall({ url: `${GL_BASE}/locations/v1/locations`, method: 'POST', token, body: bodyWithContacts });
+      if (res2.ok) return res2.json();
+      const err2 = await res2.text();
+      throw new Error(`Create location error ${res2.status}: ${err2}`);
+    }
+    throw new Error(`Create location error ${res1.status}: ${err1}`);
   },
 
   // GreenLake: fetch provisioned services for this workspace.
