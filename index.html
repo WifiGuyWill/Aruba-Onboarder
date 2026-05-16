@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516k -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516l -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -819,9 +819,38 @@ const liveApi = {
       }
     } catch (e) { console.warn('[centralGetSystemInfo] config devices fail:', e.message); }
 
+    // Step 3: now that we have the numeric scopeId, read the system-info record directly.
+    // This tells us the exact current structure — field names, hostname value, alias state —
+    // so we know exactly what to send on write.
+    let sysInfo = null;
+    if (numericScopeId) {
+      const siParams = [
+        `scope-id=${encodeURIComponent(numericScopeId)}&view-type=LOCAL`,
+        `scope-id=${encodeURIComponent(numericScopeId)}`,
+        `scope-id=${encodeURIComponent(numericScopeId)}&view-type=LOCAL&detailed=true`,
+      ];
+      for (const params of siParams) {
+        try {
+          const res = await proxyCall({
+            url: `https://${centralUrl}/network-config/v1alpha1/system-info?${params}`,
+            token: centralToken,
+          });
+          console.log(`[centralGetSystemInfo] system-info GET ?${params} →`, res.status);
+          if (res.ok) {
+            sysInfo = await res.json();
+            console.log('[centralGetSystemInfo] system-info record:', JSON.stringify(sysInfo));
+            break;
+          } else {
+            const errTxt = await res.clone().text().catch(() => '');
+            console.warn(`[centralGetSystemInfo] system-info GET failed:`, errTxt.slice(0, 200));
+          }
+        } catch (e) { console.warn('[centralGetSystemInfo] system-info GET error:', e.message); }
+      }
+    }
+
     console.log('[centralGetSystemInfo] numericScopeId:', numericScopeId, '| deviceName:', monData?.deviceName);
     if (!monData && !numericScopeId) return null;
-    return { ...(monData || {}), _scopeId: numericScopeId };
+    return { ...(monData || {}), _scopeId: numericScopeId, _sysInfo: sysInfo };
   },
 
   // Central: set/update device hostname via the config API.
