@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516o -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516y -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -250,12 +250,14 @@ const liveApi = {
     const res = await proxyCall({ url: addUrl, method: 'POST', token, body });
     if (res.status === 202) {
       const loc = res.headers.get('location');
+      let pollFailed = false;
       if (loc) {
         try {
           await pollAsync(`${GL_BASE}${loc}`, token);
         } catch (pollErr) {
           // Async add failed — most common cause is device already exists in GreenLake.
           // Don't throw yet; fall through to the lookup below and use the existing record.
+          pollFailed = true;
           console.warn('[glAddDevice] async op failed — checking if device already exists:', pollErr.message);
         }
       }
@@ -268,7 +270,9 @@ const liveApi = {
       const d = await devRes.json();
       const device = (d.items || [])[0];
       if (!device) throw new Error(`Device add failed and device not found in GreenLake: ${serial}`);
-      console.log('[glAddDevice] using device:', device.id, '— assignedState:', device.assignedState, '| model:', device.model, '| partNumber:', device.partNumber);
+      console.log('[glAddDevice] using device:', device.id, '— assignedState:', device.assignedState, '| subscription:', device.subscription?.key, '| application:', device.application?.id);
+      // If the async poll failed the device was already in GreenLake — mark it.
+      const wasExisting = pollFailed;
       // Explicitly PATCH location — the initial POST body may not link it reliably.
       if (locationId && device.id) {
         const locPatch = await proxyCall({
@@ -283,7 +287,7 @@ const liveApi = {
           console.warn('[glAddDevice] location PATCH failed:', locPatch.status, await locPatch.text().catch(() => ''));
         }
       }
-      return device;
+      return wasExisting ? { ...device, foundExisting: true } : device;
     }
     if (!res.ok) {
       const errBody = await res.text();
@@ -447,6 +451,27 @@ const liveApi = {
     return tags;
   },
 
+  // GreenLake: look up a single device by serial — returns null if not found.
+  // Called right after scan to pre-populate tags, contact, subscription, and application
+  // screens before the user reaches them.
+  async glLookupDevice({ serial, token }) {
+    try {
+      const res = await proxyCall({
+        url: `${GL_BASE}/devices/v1/devices?filter=serialNumber eq '${serial}'`,
+        token,
+      });
+      if (!res.ok) return null;
+      const d = await res.json();
+      const device = (d.items || [])[0];
+      if (!device) return null;
+      console.log('[glLookupDevice] found:', device.id, '| tags:', JSON.stringify(device.tags), '| contact:', device.contact?.id, '| subscription:', device.subscription?.key, '| application:', device.application?.id);
+      return device;
+    } catch (e) {
+      console.warn('[glLookupDevice] lookup failed:', e.message);
+      return null;
+    }
+  },
+
   // GreenLake: list locations
   async glGetLocations({ token }) {
     const res = await proxyCall({ url: `${GL_BASE}/locations/v1/locations?limit=100`, token });
@@ -564,6 +589,32 @@ const liveApi = {
       if (hasApp) regions.push({ id: region.id, name: region.regionName || region.id });
     }
     return regions;
+  },
+
+  // GreenLake: PATCH — apply tags and contact to a device.
+  // Uses the v2beta1 PATCH endpoint which supports both fields.
+  // Tags: flat key/value object — null value deletes a tag.
+  // Contact type WORKSPACE-USER requires the user's GreenLake identity ID.
+  async glPatchAttributes({ deviceId, tags, contact, token }) {
+    const body = {};
+    if (tags && Object.keys(tags).length > 0) body.tags = tags;
+    if (contact?.id) {
+      body.contact = { type: 'WORKSPACE-USER', workspaceUser: { id: contact.id } };
+    }
+    if (Object.keys(body).length === 0) return { success: true }; // nothing to send
+    const res = await proxyCall({
+      url: `${GL_BASE}/devices/v2beta1/devices?id=${encodeURIComponent(deviceId)}`,
+      method: 'PATCH',
+      token,
+      body,
+    });
+    if (res.status === 202) {
+      const loc = res.headers.get('location');
+      if (loc) await pollAsync(`${GL_BASE}${loc}`, token);
+      return { success: true };
+    }
+    if (!res.ok) throw new Error(`Tags/contact update error ${res.status}: ${await res.text()}`);
+    return res.json();
   },
 
   // GreenLake: PATCH — assign subscription (async)
@@ -959,6 +1010,18 @@ const demoApi = {
     { id: 'us-west', name: 'US West' },
     { id: 'eu-west', name: 'EU West' },
   ]; },
+  async glLookupDevice({ serial } = {}) {
+    await delay(400);
+    if ((serial || '').startsWith('EXIST')) return {
+      id: 'f3a2c109-8b47-4e1d-a532-9d6e2b84f701',
+      tags: { floor: '2', role: 'AP' },
+      contact: { id: 'user-demo-123', firstName: 'Jane', lastName: 'Smith', email: 'jane.smith@example.com' },
+      subscription: { key: 'EWCCWPTSMBVPMEFS' },
+      application: { id: 'app-central-demo' },
+    };
+    return null;
+  },
+  async glPatchAttributes()    { await delay(600); return { success: true }; },
   async glAssignSubscription() { await delay(900); return { success: true }; },
   async glAssignApplication()  { await delay(700); return { success: true }; },
   async centralGetSites()      { await delay(750); return [
@@ -1551,6 +1614,14 @@ const TagsScreen = ({ settings, api, onNext, initialTags }) => {
   const [customKey, setCustomKey] = useState('');
   const [customVal, setCustomVal] = useState('');
 
+  // Background GL lookup may complete after mount — always apply the device's current
+  // tags when they arrive (authoritative over localStorage fallback).
+  useEffect(() => {
+    if (initialTags && typeof initialTags === 'object' && Object.keys(initialTags).length > 0) {
+      setSelected(initialTags);
+    }
+  }, [initialTags]);
+
   useEffect(() => {
     api.glGetTags(settings)
       .then(tags => { setExistingTags(tags); setLoading(false); })
@@ -1667,6 +1738,15 @@ const LocationScreen = ({ settings, api, onNext, initialId }) => {
       .catch(() => setLoading(false));
   }, []);
 
+  // Background GL lookup may complete after locations have loaded — always apply
+  // the device's current location when it arrives (authoritative over localStorage).
+  useEffect(() => {
+    if (initialId && locations.length > 0) {
+      const match = locations.find(l => String(l.id) === String(initialId));
+      if (match) setSelected(match);
+    }
+  }, [initialId, locations]);
+
   const filtered = locations.filter(l => (l.name || '').toLowerCase().includes(search.toLowerCase()));
 
   const handleCreate = async () => {
@@ -1778,6 +1858,15 @@ const ContactScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
       .catch(() => setLoading(false));
   }, []);
 
+  // Background GL lookup may complete after users have loaded — always apply the
+  // device's current contact when it arrives (authoritative over localStorage fallback).
+  useEffect(() => {
+    if (initialId && users.length > 0) {
+      const match = users.find(u => String(u.id) === String(initialId));
+      if (match) setSelected(match);
+    }
+  }, [initialId, users]);
+
   const filtered = users.filter(u => {
     const q = search.toLowerCase();
     return userName(u).toLowerCase().includes(q) || (u.email || '').toLowerCase().includes(q);
@@ -1856,6 +1945,30 @@ const ContactScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
 };
 
 // ── SCREEN: ADDING TO GREENLAKE (with async polling UI) ───────────────────────
+// Brief interstitial shown right after scan — does a quick GreenLake lookup to pre-populate
+// tags, contact, subscription, and application screens for devices already in the system.
+// Transitions automatically to the tags screen once the lookup completes.
+const LookupScreen = ({ serial, settings, api, onDone }) => {
+  useEffect(() => {
+    api.glLookupDevice({ serial, ...settings })
+      .then(existing => onDone(existing))
+      .catch(() => onDone(null));
+  }, []);
+
+  return (
+    <div className="p-5 step-enter">
+      <div className="pt-2 mb-8">
+        <h2 className="text-white font-bold text-xl">Checking GreenLake…</h2>
+        <p className="text-gray-400 text-sm font-mono">{serial}</p>
+      </div>
+      <div className="flex flex-col items-center py-10 space-y-4">
+        <Spinner size={48} />
+        <p className="text-gray-500 text-sm">Looking up device…</p>
+      </div>
+    </div>
+  );
+};
+
 const AddingScreen = ({ device, settings, api, onSuccess, onBack }) => {
   const [status, setStatus] = useState('loading');
   const [msg, setMsg] = useState('Registering device in HPE GreenLake…');
@@ -2019,7 +2132,7 @@ const REGION_LABELS = {
 const regionLabel = id => REGION_LABELS[id] || id;
 
 // ── SCREEN: SERVICE (was Application) ────────────────────────────────────────
-const ApplicationScreen = ({ settings, api, onSelect, deviceType }) => {
+const ApplicationScreen = ({ settings, api, onSelect, deviceType, initialId }) => {
   const [apps, setApps] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(null);
@@ -2037,9 +2150,11 @@ const ApplicationScreen = ({ settings, api, onSelect, deviceType }) => {
         });
         setApps(filtered);
         setLoading(false);
-        // Auto-select if only one option or the expected app is present
-        const match = filtered.find(a => (a.name || '').toLowerCase().includes(isUxi ? 'uxi' : 'central'));
-        const auto = match || (filtered.length === 1 ? filtered[0] : null);
+        // Pre-select by current application ID if provided (existing device),
+        // otherwise auto-select the best name match or single option
+        const byId   = initialId ? filtered.find(a => String(a.id) === String(initialId)) : null;
+        const byName = filtered.find(a => (a.name || '').toLowerCase().includes(isUxi ? 'uxi' : 'central'));
+        const auto   = byId || byName || (filtered.length === 1 ? filtered[0] : null);
         if (auto) setSelected(auto);
       })
       .catch(e => { setError(e.message); setLoading(false); });
@@ -2073,7 +2188,11 @@ const ApplicationScreen = ({ settings, api, onSelect, deviceType }) => {
                     <p className="text-gray-500 text-xs mt-0.5">📍 {app.regionName || regionLabel(app.region)}</p>
                   )}
                 </div>
-                {selected?.id === app.id && <span className="text-emerald-400 shrink-0">✓</span>}
+                {selected?.id === app.id && (
+                  <span className="text-emerald-400 text-xs shrink-0">
+                    {initialId && initialId === app.id ? '✓ Currently assigned' : '✓ Selected'}
+                  </span>
+                )}
               </div>
             </button>
           ))}
@@ -2285,7 +2404,10 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
 const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
   const isUxi = summary.deviceType === 'UXI';
   const [submitting, setSubmitting] = useState(false);
+  const hasTags = Object.keys(summary.tags || {}).length > 0;
+  const hasContact = !!summary.contact;
   const [stepStatus, setStepStatus] = useState({
+    attributes: (hasTags || hasContact) ? 'pending' : 'skipped',
     subscription: summary.subscription ? 'pending' : 'skipped',
     application: 'pending',
     site: isUxi ? 'skipped' : 'pending',
@@ -2321,14 +2443,37 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
     };
 
     try {
-      if (summary.subscription) {
-        await assignStep('subscription', () =>
-          api.glAssignSubscription({ deviceId: summary.deviceId, subscriptionId: summary.subscription.id, ...settings })
+      // Apply tags + contact via a single PATCH — always run if either is set
+      if (hasTags || hasContact) {
+        await assignStep('attributes', () =>
+          api.glPatchAttributes({ deviceId: summary.deviceId, tags: summary.tags, contact: summary.contact, ...settings })
         );
       }
-      await assignStep('application', () =>
-        api.glAssignApplication({ deviceId: summary.deviceId, applicationId: summary.application.id, region: summary.applicationRegion, ...settings })
-      );
+
+      if (summary.subscription) {
+        // Skip subscription assignment if the same subscription is already on this device
+        const sameSubscription = summary.foundExisting && summary.currentSubscriptionKey
+          && summary.subscription.key === summary.currentSubscriptionKey;
+        if (sameSubscription) {
+          console.log('[provision] subscription unchanged — skipping GL assign');
+          set('subscription', 'skipped');
+        } else {
+          await assignStep('subscription', () =>
+            api.glAssignSubscription({ deviceId: summary.deviceId, subscriptionId: summary.subscription.id, ...settings })
+          );
+        }
+      }
+      // Skip application assignment if the same application is already assigned
+      const sameApplication = summary.foundExisting && summary.currentApplicationId
+        && summary.application?.id === summary.currentApplicationId;
+      if (sameApplication) {
+        console.log('[provision] application unchanged — skipping GL assign');
+        set('application', 'skipped');
+      } else {
+        await assignStep('application', () =>
+          api.glAssignApplication({ deviceId: summary.deviceId, applicationId: summary.application.id, region: summary.applicationRegion, ...settings })
+        );
+      }
       if (!isUxi) {
         // Site assignment API not available on any cluster — skip silently.
         // The site dropdown is kept in the UI for reference but no API call is made.
@@ -2373,9 +2518,9 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
   const rows = [
     { label: 'Serial',       value: summary.serial,                         mono: true },
     { label: 'MAC',          value: summary.mac,                            mono: true },
-    { label: 'Tags',         value: Object.keys(summary.tags || {}).length > 0 ? `${Object.keys(summary.tags).length} tag(s)` : 'None' },
+    { label: 'Tags',         value: Object.keys(summary.tags || {}).length > 0 ? `${Object.keys(summary.tags).length} tag(s)` : 'None', step: (hasTags || hasContact) ? 'attributes' : null },
     { label: 'Location',     value: summary.location?.name || 'None' },
-    { label: 'Contact',      value: summary.contact ? `${userName(summary.contact)}${summary.contact.email ? ` — ${summary.contact.email}` : ''}` : 'None' },
+    { label: 'Contact',      value: summary.contact ? `${userName(summary.contact)}${summary.contact.email ? ` — ${summary.contact.email}` : ''}` : 'None', step: (hasTags || hasContact) ? 'attributes' : null },
     { label: 'Subscription', value: summary.subscription?.skuDescription || 'Skip', step: 'subscription' },
     { label: 'Service',      value: summary.application?.name,              step: 'application' },
     { label: 'Region',       value: summary.application?.regionName || regionLabel(summary.applicationRegion) },
@@ -2388,8 +2533,14 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
     <div className="p-5 space-y-5 step-enter">
       <div className="pt-2">
         <h2 className="text-white font-bold text-xl">Review & Confirm</h2>
-        <p className="text-gray-400 text-sm">Everything looks good? Let's provision.</p>
+        <p className="text-gray-400 text-sm">{summary.foundExisting ? 'Device already in GreenLake — updating assignments.' : "Everything looks good? Let's provision."}</p>
       </div>
+      {summary.foundExisting && (
+        <div className="flex items-start gap-3 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-2xl px-4 py-3">
+          <span className="text-amber-400 text-lg shrink-0">⚠️</span>
+          <p className="text-amber-300 text-sm">This device is already in GreenLake. Only changes you made on the previous screens will be applied.</p>
+        </div>
+      )}
       <Card className="space-y-0 divide-y divide-white divide-opacity-5">
         {rows.map(row => (
           <div key={row.label} className="flex items-center justify-between py-3 gap-3">
@@ -2626,14 +2777,35 @@ const App = () => {
               </div>
             )}
             <ScanScreen settings={liveSettings}
-              onScanned={(d, raw) => { upd({ ...d, rawBarcode: raw }); enterScreen('tags'); }}
+              onScanned={(d, raw) => {
+                upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null });
+                // Background lookup — fetch a fresh token first so the lookup doesn't fail
+                // if liveSettings.token is stale at the moment the scan fires.
+                getGlToken()
+                  .then(token => api.glLookupDevice({ serial: d.serial, ...liveSettings, token }))
+                  .then(existing => {
+                    if (existing) upd({
+                      currentTags:            existing.tags || {},
+                      currentContactId:       existing.contact?.id || null,
+                      currentLocationId:      existing.location?.id || null,
+                      currentSubscriptionKey: existing.subscription?.key || null,
+                      currentApplicationId:   existing.application?.id  || null,
+                    });
+                  })
+                  .catch(e => console.warn('[glLookupDevice background] failed:', e.message));
+                enterScreen('tags');
+              }}
               onOpenSettings={() => setScreen('settings')} />
           </>
         )}
 
         {screen === 'tags' && (
           <TagsScreen settings={liveSettings} api={api}
-            initialTags={(() => { try { return JSON.parse(localStorage.getItem('aruba_last_tags')); } catch(e) { return null; } })()}
+            initialTags={
+              Object.keys(summary.currentTags || {}).length > 0
+                ? summary.currentTags
+                : (() => { try { return JSON.parse(localStorage.getItem('aruba_last_tags')); } catch(e) { return null; } })()
+            }
             onNext={tags => {
               if (Object.keys(tags).length > 0) localStorage.setItem('aruba_last_tags', JSON.stringify(tags));
               upd({ tags }); enterScreen('location');
@@ -2642,7 +2814,7 @@ const App = () => {
 
         {screen === 'location' && (
           <LocationScreen settings={liveSettings} api={api}
-            initialId={localStorage.getItem('aruba_last_location')}
+            initialId={summary.currentLocationId || localStorage.getItem('aruba_last_location')}
             onNext={loc => {
               if (loc?.id) localStorage.setItem('aruba_last_location', String(loc.id));
               upd({ location: loc }); enterScreen('contact');
@@ -2651,7 +2823,7 @@ const App = () => {
 
         {screen === 'contact' && (
           <ContactScreen settings={liveSettings} api={api}
-            initialId={localStorage.getItem('aruba_last_contact')}
+            initialId={summary.currentContactId || localStorage.getItem('aruba_last_contact')}
             onSelect={contact => {
               if (contact?.id) localStorage.setItem('aruba_last_contact', String(contact.id));
               upd({ contact }); enterScreen('adding_gl');
@@ -2670,10 +2842,14 @@ const App = () => {
                 deviceType: mapped,
                 deviceModel: device.model || device.deviceModel || null,
                 devicePartNumber: device.partNumber || null,
-                foundExisting:          device.foundExisting || false,
-                currentSubscriptionKey: device.subscription?.key || null,
-                currentApplicationId:   device.application?.id  || null,
+                foundExisting: device.foundExisting || false,
+                // Only overwrite current* values if the device response actually contains them —
+                // the background lookup (glLookupDevice) may have already set these and we
+                // don't want to clobber them with null if the v1 response omits the fields.
+                ...(device.subscription?.key ? { currentSubscriptionKey: device.subscription.key } : {}),
+                ...(device.application?.id   ? { currentApplicationId:   device.application.id  } : {}),
               });
+              console.log('[onSuccess] subscription?.key:', device.subscription?.key, '| application?.id:', device.application?.id);
               enterScreen(mapped ? 'subscription' : 'device_type');
             }}
             onBack={() => setScreen('location')} />
@@ -2696,6 +2872,7 @@ const App = () => {
 
         {screen === 'application' && (
           <ApplicationScreen settings={liveSettings} api={api} deviceType={summary.deviceType}
+            initialId={summary.currentApplicationId || null}
             onSelect={(app) => { upd({ application: app, applicationRegion: app.region }); enterScreen(summary.deviceType === 'UXI' ? 'review' : 'site'); }} />
         )}
 
