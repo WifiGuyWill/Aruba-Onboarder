@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260516y -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260517a -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1388,8 +1388,9 @@ const SettingsScreen = ({ settings, onSave, onBack }) => {
 
       <Toggle value={s.demoMode} onChange={set('demoMode')}
         label="Demo Mode" sublabel="Simulate all API calls — no real requests made" />
-      <Toggle value={s.scanConfirm ?? true} onChange={set('scanConfirm')}
-        label="Scan Confirmation" sublabel="Preview each barcode scan before accepting — tap Rescan if it looks wrong" />
+
+      {/* Options collapsible — Scan Confirmation, Batch Mode, and future settings */}
+      <OptionsPanel s={s} set={set} />
 
       {!s.demoMode && (
         <>
@@ -1476,6 +1477,42 @@ const AboutPanel = () => {
   );
 };
 
+// Collapsible options panel in Settings — groups Scan Confirmation, Batch Mode, and any future options.
+const OptionsPanel = ({ s, set }) => {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="rounded-2xl overflow-hidden"
+      style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.10)' }}>
+      <button onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center justify-between px-4 py-3.5 text-left">
+        <div className="flex items-center gap-2.5">
+          <span className="text-gray-400 text-sm">⚙️</span>
+          <span className="text-gray-300 text-sm font-semibold">Options</span>
+          {(s.batchMode || !(s.scanConfirm ?? true)) && (
+            <span className="text-xs bg-emerald-500 bg-opacity-20 text-emerald-400 px-2 py-0.5 rounded-full font-semibold">
+              {[s.batchMode && 'Batch', !(s.scanConfirm ?? true) && 'No confirm'].filter(Boolean).join(' · ')}
+            </span>
+          )}
+        </div>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          className={`text-gray-500 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}>
+          <polyline points="6 9 12 15 18 9"/>
+        </svg>
+      </button>
+      {open && (
+        <div className="border-t border-white border-opacity-5 divide-y divide-white divide-opacity-5">
+          <Toggle value={s.scanConfirm ?? true} onChange={set('scanConfirm')}
+            label="Scan Confirmation"
+            sublabel="Preview each barcode scan before accepting — tap Rescan if it looks wrong" />
+          <Toggle value={s.batchMode ?? false} onChange={set('batchMode')}
+            label="Batch Mode"
+            sublabel="Scan multiple devices at once into a queue, then provision them all together" />
+        </div>
+      )}
+    </div>
+  );
+};
+
 const WelcomeScreen = ({ onDismiss }) => (
   <div className="p-5 flex flex-col step-enter" style={{ paddingTop: '4rem', paddingBottom: '2rem' }}>
     <div className="space-y-6">
@@ -1530,7 +1567,7 @@ const WelcomeScreen = ({ onDismiss }) => (
   </div>
 );
 
-const ScanScreen = ({ settings, onScanned, onBatch, onOpenSettings }) => {
+const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
   const [fields, setFields] = useState({ serial: '', mac: '' });
   const [lastScan, setLastScan] = useState(null);
   const [scanCount, setScanCount] = useState(0);
@@ -1594,13 +1631,7 @@ const ScanScreen = ({ settings, onScanned, onBatch, onOpenSettings }) => {
           <h2 className="text-white font-bold text-xl">Scan Device</h2>
           <p className="text-gray-400 text-sm">Scan S/N and MAC barcodes — one at a time</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={onBatch}
-            className="flex items-center gap-1.5 px-3 py-2 bg-indigo-500 bg-opacity-20 border border-indigo-500 border-opacity-30 rounded-xl text-indigo-300 text-xs font-semibold active:bg-opacity-30">
-            <span>⚡</span><span>Batch</span>
-          </button>
-          <button onClick={onOpenSettings} className="w-9 h-9 bg-white bg-opacity-10 rounded-xl flex items-center justify-center text-base">⚙️</button>
-        </div>
+        <button onClick={onOpenSettings} className="w-9 h-9 bg-white bg-opacity-10 rounded-xl flex items-center justify-center text-base">⚙️</button>
       </div>
 
       {settings.demoMode && (
@@ -2786,61 +2817,17 @@ const BatchScanScreen = ({ settings, api, onDone, onBack }) => {
   const [current, setCurrent]       = useState({ serial: '', mac: '' });
   const [pendingScan, setPendingScan] = useState(null);
   const [cameraErr, setCameraErr]   = useState('');
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualSerial, setManualSerial] = useState('');
+  const [manualMac, setManualMac]   = useState('');
   const confirmTimer  = useRef(null);
   const demoIdxRef    = useRef(0);  // increments so each demo scan gets a unique serial
 
-  // Helper used by demo buttons: bypass scan confirmation and add directly
-  const addDemoDevice = useCallback(raw => {
-    const result = parseBarcode(raw);
-    if (!result.serial) return;
-    const id = `${result.serial}_${Date.now()}`;
-    const newItem = {
-      _id: id, serial: result.serial, mac: result.mac || null,
-      lookupStatus: 'loading', isExisting: false,
-      glDeviceId: null, deviceType: null, deviceModel: null, partNumber: null,
-      currentSubscriptionKey: null, currentApplicationId: null,
-      currentLocationId: null, currentContactId: null,
-      currentSiteId: null, currentFunctionId: null, currentTags: {},
-    };
-    setQueue(q => [...q, newItem]);
-    const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
-    Promise.all([
-      api.glLookupDevice({ serial: result.serial, ...settings }),
-      api.centralGetDeviceSiteId({ serial: result.serial, centralToken: settings.centralToken || settings.token, centralUrl }),
-    ]).then(([glResult, centralInfo]) => {
-      const glData = glResult || {};
-      const glType = (glData.deviceType || '').toUpperCase();
-      const mapped = GL_DEVICE_TYPE_MAP[glType] || null;
-      const { siteId, persona } = centralInfo || {};
-      setQueue(q => q.map(qi => qi._id !== id ? qi : {
-        ...qi,
-        lookupStatus: 'done',
-        isExisting: !!glData.id,
-        glDeviceId: glData.id || null,
-        deviceType: mapped,
-        deviceModel: glData.model || glData.deviceModel || null,
-        partNumber: glData.partNumber || null,
-        currentSubscriptionKey: glData._subKey || null,
-        currentApplicationId: glData.application?.id || null,
-        currentLocationId: glData.location?.id || null,
-        currentContactId: glData.contact?.workspaceUser?.id || glData.contact?.id || null,
-        currentTags: glData.tags || {},
-        currentSiteId: siteId || null,
-        currentFunctionId: (persona && persona !== 'None') ? persona : null,
-      }));
-    }).catch(() => setQueue(q => q.map(qi => qi._id !== id ? qi : { ...qi, lookupStatus: 'done' })));
-  }, [settings, api]);
-
-  // Auto-add when both serial + MAC are present
-  useEffect(() => {
-    if (!current.serial || !current.mac) return;
-    const serial = current.serial;
-    const mac    = current.mac;
-    setCurrent({ serial: '', mac: '' });
-
+  // Core helper: add a device to the queue and kick off background lookup
+  const addItemToQueue = useCallback((serial, mac) => {
     const id = `${serial}_${Date.now()}`;
     const newItem = {
-      _id: id, serial, mac,
+      _id: id, serial, mac: mac || null,
       lookupStatus: 'loading', isExisting: false,
       glDeviceId: null, deviceType: null, deviceModel: null, partNumber: null,
       currentSubscriptionKey: null, currentApplicationId: null,
@@ -2848,8 +2835,6 @@ const BatchScanScreen = ({ settings, api, onDone, onBack }) => {
       currentSiteId: null, currentFunctionId: null, currentTags: {},
     };
     setQueue(q => [...q, newItem]);
-
-    // Background GL + Central lookup in parallel
     const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
     Promise.all([
       api.glLookupDevice({ serial, ...settings }),
@@ -2875,10 +2860,23 @@ const BatchScanScreen = ({ settings, api, onDone, onBack }) => {
         currentSiteId: siteId || null,
         currentFunctionId: (persona && persona !== 'None') ? persona : null,
       }));
-    }).catch(e => {
-      console.warn('[batch lookup]', serial, e.message);
-      setQueue(q => q.map(qi => qi._id !== id ? qi : { ...qi, lookupStatus: 'done' }));
-    });
+    }).catch(() => setQueue(q => q.map(qi => qi._id !== id ? qi : { ...qi, lookupStatus: 'done' })));
+  }, [settings, api]);
+
+  // Helper used by demo buttons: parse a raw barcode string then add
+  const addDemoDevice = useCallback(raw => {
+    const result = parseBarcode(raw);
+    if (!result.serial) return;
+    addItemToQueue(result.serial, result.mac);
+  }, [addItemToQueue]);
+
+  // Auto-add when both serial + MAC are present (scanner path)
+  useEffect(() => {
+    if (!current.serial || !current.mac) return;
+    const serial = current.serial;
+    const mac    = current.mac;
+    setCurrent({ serial: '', mac: '' });
+    addItemToQueue(serial, mac);
   }, [current.serial, current.mac]);
 
   const processScan = useCallback(raw => {
@@ -2965,6 +2963,51 @@ const BatchScanScreen = ({ settings, api, onDone, onBack }) => {
         <span className="flex-1">{hint}</span>
         {current.serial && !current.mac && (
           <span className="font-mono text-emerald-400 font-bold">{current.serial}</span>
+        )}
+      </div>
+
+      {/* Manual entry — collapsible */}
+      <div className="px-5 shrink-0">
+        <button
+          onClick={() => setManualOpen(o => !o)}
+          className="w-full flex items-center justify-between py-1.5 text-xs transition-colors"
+          style={{ color: manualOpen ? '#10b981' : '#4b5563' }}
+        >
+          <span>⌨️ Enter serial manually</span>
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
+            style={{ transform: manualOpen ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </button>
+        {manualOpen && (
+          <div className="space-y-2 pb-2">
+            <input
+              value={manualSerial}
+              onChange={e => setManualSerial(e.target.value.toUpperCase())}
+              placeholder="Serial number  e.g. CP0001108"
+              className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-3 py-2.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm font-mono transition-colors"
+            />
+            <input
+              value={manualMac}
+              onChange={e => setManualMac(e.target.value.toUpperCase())}
+              placeholder="MAC address (optional)  e.g. 00:0B:86:B8:64:18"
+              className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-3 py-2.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm font-mono transition-colors"
+            />
+            <button
+              onClick={() => {
+                const s = manualSerial.trim();
+                if (s.length < 4) return;
+                addItemToQueue(s, manualMac.trim() || null);
+                setManualSerial('');
+                setManualMac('');
+                setManualOpen(false);
+              }}
+              disabled={manualSerial.trim().length < 4}
+              className="w-full py-2.5 rounded-xl text-sm font-semibold text-white bg-emerald-600 active:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+            >
+              Add to queue →
+            </button>
+          </div>
         )}
       </div>
 
@@ -3507,6 +3550,7 @@ const defaultSettings = () => ({
   centralCluster: 'eu1',
   demoMode: false,
   scanConfirm: true,
+  batchMode: false,
 });
 
 const App = () => {
@@ -3568,7 +3612,7 @@ const App = () => {
   const saveSettings = s => {
     const toStore = {
       glClientId: s.glClientId, glClientSecret: s.glClientSecret, workspaceId: s.workspaceId,
-      centralCluster: s.centralCluster, demoMode: s.demoMode, scanConfirm: s.scanConfirm,
+      centralCluster: s.centralCluster, demoMode: s.demoMode, scanConfirm: s.scanConfirm, batchMode: s.batchMode,
     };
     localStorage.setItem('aruba_cfg2', JSON.stringify(toStore));
     glTokenRef.current = { token: null, expiry: 0 };
@@ -3695,7 +3739,17 @@ const App = () => {
             onBack={summary.serial ? () => setScreen('scan') : null} />
         )}
 
-        {screen === 'scan' && (
+        {screen === 'scan' && liveSettings.batchMode && (
+          <BatchScanScreen settings={liveSettings} api={api}
+            onBack={null}
+            onDone={queue => {
+              setBatchQueue(queue);
+              setBatchShared({});
+              enterScreen('batch_tags');
+            }} />
+        )}
+
+        {screen === 'scan' && !liveSettings.batchMode && (
           <>
             {tokenError && (
               <div className="mx-5 mb-3 p-3 rounded-xl bg-red-900/40 border border-red-500/40">
@@ -3705,7 +3759,6 @@ const App = () => {
               </div>
             )}
             <ScanScreen settings={liveSettings}
-              onBatch={() => enterScreen('batch_scan')}
               onScanned={(d, raw) => {
                 upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null, currentSiteId: null, currentFunctionId: null });
                 // Background lookups — fetch a fresh token first so lookups don't fail
