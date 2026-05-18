@@ -2741,6 +2741,17 @@ const SuccessScreen = ({ summary, onAnother }) => (
 
 // ── BATCH HELPERS ─────────────────────────────────────────────────────────────
 
+// Generates a hostname from a pattern for a specific device + index.
+// Supported tokens: {N} {N:02} {N:03} {SERIAL} {MODEL} {PART}
+function generateHostname(pattern, device, idx) {
+  return pattern
+    .replace(/\{N:(\d+)\}/g, (_, pad) => String(idx).padStart(parseInt(pad, 10), '0'))
+    .replace(/\{N\}/g, String(idx))
+    .replace(/\{SERIAL\}/g, device.serial || '')
+    .replace(/\{MODEL\}/g, (device.deviceModel || '').replace(/\s+/g, '-'))
+    .replace(/\{PART\}/g, device.partNumber || '');
+}
+
 // Groups queue results (after GL add) by part number (J-number).
 // Devices with no part number get their own single-device group keyed by serial.
 function computeBatchGroups(results) {
@@ -3146,6 +3157,105 @@ const BatchGroupBanner = ({ group, groupIdx, totalGroups }) => (
   </div>
 );
 
+// ── SCREEN: BATCH HOSTNAME ────────────────────────────────────────────────────
+// Optional — user enters a pattern; skip is the default / primary action.
+const BatchHostnameScreen = ({ queue, onNext, onSkip }) => {
+  const [pattern, setPattern] = useState('');
+  const successItems = queue.filter(q => q.status === 'success');
+
+  // Validate: no spaces, only hostname-safe chars + our tokens
+  const stripped = pattern.replace(/\{[^}]*\}/g, 'X'); // remove tokens before checking
+  const invalid = stripped.length > 0 && !/^[a-zA-Z0-9\-X]+$/.test(stripped);
+  const preview = pattern.trim()
+    ? successItems.map((item, i) => ({
+        serial: item.serial,
+        model: item.deviceModel || item.partNumber || '—',
+        name: generateHostname(pattern.trim(), item, i + 1),
+      }))
+    : [];
+
+  const canApply = pattern.trim().length > 0 && !invalid && preview.length > 0;
+
+  const handleApply = () => {
+    const hostnames = {};
+    successItems.forEach((item, i) => {
+      hostnames[item.serial] = generateHostname(pattern.trim(), item, i + 1);
+    });
+    onNext({ hostnames, hostnamePattern: pattern.trim() });
+  };
+
+  return (
+    <div className="p-5 pb-8 step-enter">
+      <div className="pt-2 mb-4">
+        <h2 className="text-white font-bold text-xl">Hostname Pattern</h2>
+        <p className="text-gray-400 text-sm">Optional — assign names to all devices at once</p>
+      </div>
+
+      {/* API limitation warning */}
+      <div className="flex items-start gap-3 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-2xl px-4 py-3 mb-5">
+        <span className="text-amber-400 text-lg shrink-0">⚠️</span>
+        <p className="text-amber-300 text-xs leading-relaxed">Hostname assignment only works for devices already provisioned in New Central with a site assigned. Devices just added will be skipped — set those manually in Aruba Central.</p>
+      </div>
+
+      {/* Skip is the primary / easy action */}
+      <Btn onClick={onSkip} className="mb-5">Skip →</Btn>
+
+      {/* Divider */}
+      <div className="flex items-center gap-3 mb-5">
+        <div className="flex-1 h-px bg-white bg-opacity-10" />
+        <span className="text-gray-600 text-xs">or set a pattern</span>
+        <div className="flex-1 h-px bg-white bg-opacity-10" />
+      </div>
+
+      {/* Pattern input */}
+      <div className="space-y-2 mb-3">
+        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Pattern</label>
+        <input
+          value={pattern}
+          onChange={e => setPattern(e.target.value)}
+          placeholder="e.g. AP-Floor-{N:02}"
+          className={`w-full bg-white bg-opacity-5 border rounded-xl px-4 py-3.5 text-white placeholder-gray-700 focus:outline-none text-sm font-mono transition-colors ${invalid ? 'border-red-500 border-opacity-60 focus:border-red-500' : 'border-white border-opacity-10 focus:border-emerald-500'}`}
+        />
+        {invalid && <p className="text-red-400 text-xs">Only letters, numbers, dashes, and pattern tokens allowed</p>}
+      </div>
+
+      {/* Token reference */}
+      <div className="flex flex-wrap gap-1.5 mb-5">
+        {['{N}','  {N:02}','{N:03}','{SERIAL}','{MODEL}','{PART}'].map(t => (
+          <button key={t} onClick={() => setPattern(p => p + t.trim())}
+            className="px-2 py-1 text-xs font-mono bg-white bg-opacity-5 border border-white border-opacity-10 rounded-lg text-gray-400 active:bg-opacity-10">
+            {t.trim()}
+          </button>
+        ))}
+      </div>
+
+      {/* Live preview */}
+      {preview.length > 0 && (
+        <div className="mb-5">
+          <p className="text-gray-500 text-xs uppercase tracking-wider font-semibold mb-2">Preview</p>
+          <div className="space-y-1.5">
+            {preview.slice(0, 6).map(p => (
+              <div key={p.serial} className="flex items-center gap-3 bg-white bg-opacity-5 rounded-xl px-3 py-2">
+                <span className="text-gray-500 text-xs font-mono flex-1 truncate">{p.serial}</span>
+                <span className="text-gray-600 text-xs">→</span>
+                <span className="text-emerald-300 text-xs font-mono font-semibold">{p.name}</span>
+              </div>
+            ))}
+            {preview.length > 6 && (
+              <p className="text-gray-600 text-xs text-center">…and {preview.length - 6} more</p>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Apply button — secondary action */}
+      <Btn variant="secondary" onClick={handleApply} disabled={!canApply}>
+        Apply Pattern →
+      </Btn>
+    </div>
+  );
+};
+
 // ── SCREEN: BATCH REVIEW ──────────────────────────────────────────────────────
 const BatchReviewScreen = ({ queue, groups, shared, onBack, onProvision }) => {
   const successItems = queue.filter(q => q.status === 'success');
@@ -3173,6 +3283,7 @@ const BatchReviewScreen = ({ queue, groups, shared, onBack, onProvision }) => {
           ['Tags',        Object.keys(shared.tags || {}).length > 0 ? Object.entries(shared.tags).map(([k,v]) => `${k}: ${v}`).join(', ') : null],
           ['Application', shared.application?.name],
           ['Site',        shared.site?.name],
+          ['Hostnames',   shared.hostnamePattern ? `Pattern: ${shared.hostnamePattern}` : null],
         ].map(([label, value]) => (
           <div key={label} className="flex items-start justify-between py-3 gap-4">
             <span className="text-gray-500 text-sm shrink-0">{label}</span>
@@ -3238,7 +3349,7 @@ const BatchProvisionScreen = ({ queue, groups, shared, settings, api, onDone }) 
       const allResults = {};
       for (const item of successItems) {
         setCurrentSerial(item.serial);
-        const steps = { tags: 'pending', sub: 'pending', app: 'pending', site: 'pending', fn: 'pending' };
+        const steps = { tags: 'pending', sub: 'pending', app: 'pending', site: 'pending', fn: 'pending', hostname: 'pending' };
         const set = (k, v) => { steps[k] = v; setResults(prev => ({ ...prev, [item.serial]: { ...steps } })); };
         const group = groupBySerial[item.serial];
 
@@ -3281,6 +3392,21 @@ const BatchProvisionScreen = ({ queue, groups, shared, settings, api, onDone }) 
           catch(e) { set('fn', e.softFail ? 'skipped' : 'error'); }
         } else { set('fn', 'skipped'); }
 
+        // Hostname (soft-fail if device not yet in Central)
+        const hostname = shared.hostnames?.[item.serial];
+        if (hostname) {
+          try {
+            set('hostname', 'loading');
+            const sysInfo = await api.centralGetSystemInfo({ serial: item.serial, deviceType: item.deviceType, ...settings });
+            const scopeId = sysInfo?._scopeId || null;
+            if (!scopeId) throw Object.assign(new Error('Device not in Central yet'), { softFail: true });
+            const hasExisting = !!(sysInfo?.deviceName && !/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(sysInfo.deviceName));
+            const persona = fn?.id || item.currentFunctionId || 'CAMPUS_AP';
+            await api.centralSetHostname({ serial: item.serial, hostname, hostnameExists: hasExisting, scopeId, persona, deviceType: item.deviceType, ...settings });
+            set('hostname', 'success');
+          } catch(e) { set('hostname', e.softFail ? 'skipped' : 'error'); }
+        } else { set('hostname', 'skipped'); }
+
         allResults[item.serial] = { ...steps };
         setResults({ ...allResults });
       }
@@ -3292,7 +3418,7 @@ const BatchProvisionScreen = ({ queue, groups, shared, settings, api, onDone }) 
 
   const successItems = queue.filter(q => q.status === 'success');
   const doneCount    = Object.keys(results).length;
-  const stepLabels   = [['tags','Tags'],['sub','Sub'],['app','App'],['site','Site'],['fn','Fn']];
+  const stepLabels   = [['tags','Tags'],['sub','Sub'],['app','App'],['site','Site'],['fn','Fn'],['hostname','Name']];
   const stepColor    = v => v === 'success' ? 'bg-emerald-500 bg-opacity-20 text-emerald-400' : v === 'skipped' ? 'bg-white bg-opacity-10 text-gray-600' : v === 'error' ? 'bg-red-500 bg-opacity-20 text-red-400' : v === 'loading' ? 'bg-yellow-500 bg-opacity-20 text-yellow-400' : 'bg-white bg-opacity-5 text-gray-700';
 
   return (
@@ -3481,7 +3607,8 @@ const App = () => {
       case 'batch_function':     setScreen('batch_subscription'); break;
       case 'batch_application':  setScreen(batchGroups.length > 0 ? 'batch_function' : 'batch_adding_gl'); break;
       case 'batch_site':         setScreen('batch_application'); break;
-      case 'batch_review':       setScreen('batch_site'); break;
+      case 'batch_hostname':     setScreen('batch_site'); break;
+      case 'batch_review':       setScreen('batch_hostname'); break;
       default: break;
     }
   };
@@ -3863,9 +3990,22 @@ const App = () => {
             onSelect={site => {
               localStorage.setItem('aruba_last_site', String(site.id));
               setBatchShared(s => ({ ...s, site }));
+              enterScreen('batch_hostname');
+            }}
+            onSkip={() => { setBatchShared(s => ({ ...s, site: null })); enterScreen('batch_hostname'); }} />
+        )}
+
+        {screen === 'batch_hostname' && (
+          <BatchHostnameScreen
+            queue={batchQueue}
+            onNext={({ hostnames, hostnamePattern }) => {
+              setBatchShared(s => ({ ...s, hostnames, hostnamePattern }));
               enterScreen('batch_review');
             }}
-            onSkip={() => { setBatchShared(s => ({ ...s, site: null })); enterScreen('batch_review'); }} />
+            onSkip={() => {
+              setBatchShared(s => ({ ...s, hostnames: null, hostnamePattern: null }));
+              enterScreen('batch_review');
+            }} />
         )}
 
         {screen === 'batch_review' && (
@@ -3873,7 +4013,7 @@ const App = () => {
             queue={batchQueue}
             groups={batchGroups}
             shared={batchShared}
-            onBack={() => setScreen('batch_site')}
+            onBack={() => setScreen('batch_hostname')}
             onProvision={() => enterScreen('batch_provisioning')} />
         )}
 
