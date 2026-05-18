@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518l -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518m -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -13,12 +13,11 @@
   <style>
     * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
     body { background: #111827; min-height: 100vh; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-    #qr-reader { width: 100% !important; height: 100% !important; overflow: hidden !important; border: none !important; background: transparent !important; }
-    #qr-reader__scan_region { height: 100% !important; overflow: hidden !important; }
-    #qr-reader video { border-radius: 16px; width: 100% !important; height: 100% !important; object-fit: cover; }
-    #qr-reader__scan_region { background: transparent !important; }
-    #qr-reader__dashboard { display: none !important; }
-    #qr-reader__status_span { display: none !important; }
+    #qr-reader-div { width: 100% !important; height: 100% !important; overflow: hidden !important; border: none !important; background: transparent !important; }
+    #qr-reader-div video { width: 100% !important; height: 100% !important; object-fit: cover; border-radius: 16px; }
+    #qr-reader-div__scan_region { background: transparent !important; }
+    #qr-reader-div__dashboard { display: none !important; }
+    #qr-reader-div__status_span { display: none !important; }
     .step-enter { animation: slideIn 0.25s ease-out; }
     @keyframes slideIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
     .spinner { border: 3px solid rgba(16,185,129,0.2); border-top: 3px solid #10b981; border-radius: 50%; width: 36px; height: 36px; animation: spin 0.7s linear infinite; }
@@ -1356,8 +1355,8 @@ const BarcodeScanner = ({ onScan, onCameraError, continuous = false }) => {
   }, []);
 
   return (
-    <div className="relative bg-black rounded-2xl overflow-hidden">
-      <div id="qr-reader-div" />
+    <div className="relative bg-black rounded-2xl overflow-hidden h-full">
+      <div id="qr-reader-div" style={{ height: '100%' }} />
       <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
         <div className="relative" style={{ width: 260, height: 120 }}>
           {[['top-0 left-0','border-t-2 border-l-2 rounded-tl-lg'],['top-0 right-0','border-t-2 border-r-2 rounded-tr-lg'],
@@ -2928,8 +2927,38 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
         </div>
       </div>
 
+      {/* Camera — fixed height container, overflow-hidden clips library's oversized video */}
+      <div className="px-5 shrink-0" style={{ height: '38dvh', minHeight: 200, maxHeight: 300 }}>
+        {!cameraErr
+          ? <div className="relative h-full">
+              <BarcodeScanner onScan={handleScan} onCameraError={setCameraErr} continuous />
+              {pendingScan && (() => {
+                const parsed = parseBarcode(pendingScan);
+                return (
+                  <div className="absolute inset-x-0 bottom-0 rounded-b-2xl overflow-hidden"
+                    style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.95) 60%, rgba(0,0,0,0.7) 100%)' }}>
+                    <div className="h-0.5 bg-emerald-500 opacity-60"
+                      style={{ animation: `shrinkWidth ${SCAN_CONFIRM_MS}ms linear forwards` }} />
+                    <div className="px-4 pt-3 pb-3 space-y-2">
+                      {parsed.serial && <p className="text-white text-sm font-mono text-center">S/N: <span className="text-emerald-400 font-bold">{parsed.serial}</span></p>}
+                      {parsed.mac    && <p className="text-white text-sm font-mono text-center">MAC: <span className="text-emerald-400 font-bold">{parsed.mac}</span></p>}
+                      <div className="flex gap-2">
+                        <button onClick={() => { clearTimeout(confirmTimer.current); setPendingScan(null); }}
+                          className="flex-1 py-2 rounded-xl text-sm font-semibold text-gray-300 border border-white border-opacity-20 bg-white bg-opacity-10">✕ Rescan</button>
+                        <button onClick={() => { clearTimeout(confirmTimer.current); setPendingScan(null); processScan(pendingScan); }}
+                          className="flex-1 py-2 rounded-xl text-sm font-semibold text-white bg-emerald-600">✓ Use this</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          : <div className="h-full flex items-center"><ErrorBanner msg={cameraErr} /></div>
+        }
+      </div>
+
       {/* Status line */}
-      <div className={`mx-5 mb-2 flex items-center gap-2 rounded-xl px-3 py-2 text-xs shrink-0 ${
+      <div className={`mx-5 my-2 flex items-center gap-2 rounded-xl px-3 py-2 text-xs shrink-0 ${
         current.serial
           ? 'bg-emerald-500 bg-opacity-10 border border-emerald-500 border-opacity-30 text-emerald-300'
           : 'bg-white bg-opacity-5 text-gray-500'
@@ -2989,8 +3018,8 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
         )}
       </div>
 
-      {/* Queue — fixed height, scrollable, always visible above camera */}
-      <div className="overflow-y-auto px-5 shrink-0" style={{ maxHeight: 160 }}>
+      {/* Queue — scrollable, fills remaining space */}
+      <div className="flex-1 overflow-y-auto px-5 min-h-0">
         {queue.length === 0
           ? <div className="flex flex-col items-center py-4 text-center">
               <p className="text-gray-600 text-sm">No devices scanned yet</p>
@@ -3027,36 +3056,6 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
                 ))}
               </div>
             </>
-        }
-      </div>
-
-      {/* Camera — fills remaining space; library can expand it freely without covering controls above */}
-      <div className="px-5 flex-1 min-h-0 overflow-hidden">
-        {!cameraErr
-          ? <div className="relative h-full">
-              <BarcodeScanner onScan={handleScan} onCameraError={setCameraErr} continuous />
-              {pendingScan && (() => {
-                const parsed = parseBarcode(pendingScan);
-                return (
-                  <div className="absolute inset-x-0 bottom-0 rounded-b-2xl overflow-hidden"
-                    style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.95) 60%, rgba(0,0,0,0.7) 100%)' }}>
-                    <div className="h-0.5 bg-emerald-500 opacity-60"
-                      style={{ animation: `shrinkWidth ${SCAN_CONFIRM_MS}ms linear forwards` }} />
-                    <div className="px-4 pt-3 pb-3 space-y-2">
-                      {parsed.serial && <p className="text-white text-sm font-mono text-center">S/N: <span className="text-emerald-400 font-bold">{parsed.serial}</span></p>}
-                      {parsed.mac    && <p className="text-white text-sm font-mono text-center">MAC: <span className="text-emerald-400 font-bold">{parsed.mac}</span></p>}
-                      <div className="flex gap-2">
-                        <button onClick={() => { clearTimeout(confirmTimer.current); setPendingScan(null); }}
-                          className="flex-1 py-2 rounded-xl text-sm font-semibold text-gray-300 border border-white border-opacity-20 bg-white bg-opacity-10">✕ Rescan</button>
-                        <button onClick={() => { clearTimeout(confirmTimer.current); setPendingScan(null); processScan(pendingScan); }}
-                          className="flex-1 py-2 rounded-xl text-sm font-semibold text-white bg-emerald-600">✓ Use this</button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-          : <div className="h-full flex items-center"><ErrorBanner msg={cameraErr} /></div>
         }
       </div>
 
