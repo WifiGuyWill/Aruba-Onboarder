@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260517c -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260517d -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -3714,6 +3714,9 @@ const App = () => {
             <p className="text-gray-500 text-xs">GreenLake + Aruba Central Provisioning</p>
           </div>
           <div className="ml-auto flex items-center gap-2">
+            {settings.batchMode && (
+              <span className="text-xs bg-purple-500 bg-opacity-20 text-purple-400 px-2.5 py-1 rounded-full font-semibold">⚡ Batch Scan</span>
+            )}
             {settings.demoMode && (
               <span className="text-xs bg-yellow-500 bg-opacity-20 text-yellow-400 px-2.5 py-1 rounded-full font-semibold">Demo</span>
             )}
