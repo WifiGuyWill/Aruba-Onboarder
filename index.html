@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518a -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518b -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -3626,6 +3626,9 @@ const App = () => {
     }
   }, []);
 
+  // Scroll to top on every screen change so sticky header never covers content
+  useEffect(() => { window.scrollTo(0, 0); }, [screen]);
+
   const saveSettings = s => {
     const toStore = {
       glClientId: s.glClientId, glClientSecret: s.glClientSecret, workspaceId: s.workspaceId,
@@ -3641,7 +3644,8 @@ const App = () => {
   };
 
   const isBatch = screen.startsWith('batch_');
-  const showProgress = !isBatch && !['settings','success','boot'].includes(screen);
+  // Don't show progress bar on batch-mode scan home screen — it's the entry point, not step 1
+  const showProgress = !isBatch && !(settings.batchMode && screen === 'scan') && !['settings','success','boot'].includes(screen);
   const currentStep = STEP_PROGRESS[screen] ?? 0;
   const backTarget = isBatch ? null : ({
     tags:        'scan',
