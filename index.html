@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260517d -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260517e -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2913,7 +2913,7 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
       {/* Title */}
       <div className="px-5 pt-2 pb-2 flex items-center justify-between shrink-0">
         <div>
-          <h2 className="text-white font-bold text-xl">Batch Scan</h2>
+          <h2 className="text-white font-bold text-xl">Scan Device</h2>
           <p className="text-gray-400 text-sm">Scan S/N + MAC for each device</p>
         </div>
         <div className="flex items-center gap-2">
@@ -3715,7 +3715,7 @@ const App = () => {
           </div>
           <div className="ml-auto flex items-center gap-2">
             {settings.batchMode && (
-              <span className="text-xs bg-purple-500 bg-opacity-20 text-purple-400 px-2.5 py-1 rounded-full font-semibold">⚡ Batch Scan</span>
+              <span className="text-xs bg-purple-500 bg-opacity-20 text-purple-400 px-2.5 py-1 rounded-full font-semibold whitespace-nowrap">⚡ Batch Scan</span>
             )}
             {settings.demoMode && (
               <span className="text-xs bg-yellow-500 bg-opacity-20 text-yellow-400 px-2.5 py-1 rounded-full font-semibold">Demo</span>
@@ -3945,6 +3945,7 @@ const App = () => {
         {screen === 'batch_scan' && (
           <BatchScanScreen settings={liveSettings} api={api}
             onBack={() => setScreen('scan')}
+            onOpenSettings={() => setScreen('settings')}
             onDone={queue => {
               setBatchQueue(queue);
               setBatchShared({});
