@@ -1073,17 +1073,18 @@ const liveApi = {
 const demoApi = {
   async glAddDevice({ serial } = {}) {
     await delay(1400);
-    const isSwitch   = (serial || '').startsWith('SG');
-    const isExisting = (serial || '').startsWith('EXIST');
+    const s = (serial || '').toUpperCase();
+    const isSwitch   = s.startsWith('SG') || s.startsWith('CX');
+    const isExisting = s.startsWith('EXIST');
     if (isExisting) return {
-      id: 'f3a2c109-8b47-4e1d-a532-9d6e2b84f701', deviceType: 'IAP', model: 'AP-515', make: 'HPE',
+      id: 'f3a2c109-8b47-4e1d-a532-9d6e2b84f701', deviceType: 'IAP', model: 'AP-515', partNumber: 'JW162A', make: 'HPE',
       serialNumber: serial || 'EXIST9M5904X',
       foundExisting: true,
       subscription: { key: 'EWCCWPTSMBVPMEFS', id: 'sub-ap-adv' },
     };
     return isSwitch
-      ? { id: 'ae72b841-3c1d-4f90-bb52-c9e1f23a8d05', deviceType: 'SWITCH', model: 'CX 6100 48G', make: 'HPE', serialNumber: serial || 'SG12K4B007' }
-      : { id: 'cddea735-9762-54ac-b24b-d6bda560b7f2', deviceType: 'IAP',    model: 'AP-515',      make: 'HPE', serialNumber: serial || 'VNT9M5904X' };
+      ? { id: 'ae72b841-3c1d-4f90-bb52-c9e1f23a8d05', deviceType: 'SWITCH', model: 'CX 6300 48G', partNumber: 'JL680A', make: 'HPE', serialNumber: serial || 'SG12K4B007' }
+      : { id: 'cddea735-9762-54ac-b24b-d6bda560b7f2', deviceType: 'IAP',    model: 'AP-515',      partNumber: 'JW162A', make: 'HPE', serialNumber: serial || 'VNT9M5904X' };
   },
   async glGetSubscriptions()  { await delay(900); return [
     { id: 'sub-ap-adv',   key: 'EWCCWPTSMBVPMEFS', subscriptionType: 'CENTRAL_AP',          skuDescription: 'Aruba Central AP Adv 1y Sub 90D Eval Lic',    availableQuantity: 8  },
@@ -1122,15 +1123,22 @@ const demoApi = {
   ]; },
   async glLookupDevice({ serial } = {}) {
     await delay(400);
-    if ((serial || '').startsWith('EXIST')) return {
+    const s = (serial || '').toUpperCase();
+    if (s.startsWith('EXIST')) return {
       id: 'f3a2c109-8b47-4e1d-a532-9d6e2b84f701',
+      deviceType: 'IAP', model: 'AP-515', partNumber: 'JW162A',
       tags: { floor: '2', role: 'AP' },
       contact: { id: 'usr-1', firstName: 'Will', lastName: 'Smith', email: 'will.smith@hpe.com' },
-      // API returns subscription as array; _subKey is the normalised key set by the real glLookupDevice
       subscription: [{ key: 'EWCCWPTSMBVPMEFS', id: 'sub-ap-adv' }],
-      _subKey: 'EWCCWPTSMBVPMEFS',
-      _subId:  'sub-ap-adv',
+      _subKey: 'EWCCWPTSMBVPMEFS', _subId: 'sub-ap-adv',
       application: { id: 'app-central-prod' },
+    };
+    // Simulate a known switch serial in demo
+    if (s.startsWith('SG') || s.startsWith('CX')) return {
+      id: 'ae72b841-3c1d-4f90-bb52-c9e1f23a8d05',
+      deviceType: 'SWITCH', model: 'CX 6300 48G', partNumber: 'JL680A',
+      tags: {}, contact: null, subscription: [], _subKey: null, _subId: null,
+      application: null,
     };
     return null;
   },
@@ -1522,7 +1530,7 @@ const WelcomeScreen = ({ onDismiss }) => (
   </div>
 );
 
-const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
+const ScanScreen = ({ settings, onScanned, onBatch, onOpenSettings }) => {
   const [fields, setFields] = useState({ serial: '', mac: '' });
   const [lastScan, setLastScan] = useState(null);
   const [scanCount, setScanCount] = useState(0);
@@ -1586,7 +1594,13 @@ const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
           <h2 className="text-white font-bold text-xl">Scan Device</h2>
           <p className="text-gray-400 text-sm">Scan S/N and MAC barcodes — one at a time</p>
         </div>
-        <button onClick={onOpenSettings} className="w-9 h-9 bg-white bg-opacity-10 rounded-xl flex items-center justify-center text-base">⚙️</button>
+        <div className="flex items-center gap-2">
+          <button onClick={onBatch}
+            className="flex items-center gap-1.5 px-3 py-2 bg-indigo-500 bg-opacity-20 border border-indigo-500 border-opacity-30 rounded-xl text-indigo-300 text-xs font-semibold active:bg-opacity-30">
+            <span>⚡</span><span>Batch</span>
+          </button>
+          <button onClick={onOpenSettings} className="w-9 h-9 bg-white bg-opacity-10 rounded-xl flex items-center justify-center text-base">⚙️</button>
+        </div>
       </div>
 
       {settings.demoMode && (
@@ -2725,6 +2739,580 @@ const SuccessScreen = ({ summary, onAnother }) => (
   </div>
 );
 
+// ── BATCH HELPERS ─────────────────────────────────────────────────────────────
+
+// Groups queue results (after GL add) by part number (J-number).
+// Devices with no part number get their own single-device group keyed by serial.
+function computeBatchGroups(results) {
+  const successItems = results.filter(r => r.status === 'success');
+  const groupMap = {};
+  for (const item of successItems) {
+    const key = item.partNumber || `_ungrouped_${item.serial}`;
+    if (!groupMap[key]) {
+      groupMap[key] = {
+        key,
+        partNumber: item.partNumber,
+        deviceType: item.deviceType,
+        label: item.deviceModel
+          ? `${item.deviceModel}${item.partNumber ? ` (${item.partNumber})` : ''}`
+          : (item.partNumber || item.deviceType || 'Unknown device'),
+        deviceSerials: [],
+        subscription: null,
+        deviceFunction: null,
+        currentSubscriptionKey: item.currentSubscriptionKey || null,
+        currentFunctionId: item.currentFunctionId || null,
+      };
+    }
+    groupMap[key].deviceSerials.push(item.serial);
+  }
+  return Object.values(groupMap);
+}
+
+// ── SCREEN: BATCH SCAN ────────────────────────────────────────────────────────
+// Layout 1: camera top ~55%, status line, scrollable queue list below
+const BatchScanScreen = ({ settings, api, onDone, onBack }) => {
+  const [queue, setQueue]           = useState([]);
+  const [current, setCurrent]       = useState({ serial: '', mac: '' });
+  const [pendingScan, setPendingScan] = useState(null);
+  const [cameraErr, setCameraErr]   = useState('');
+  const confirmTimer = useRef(null);
+
+  // Auto-add when both serial + MAC are present
+  useEffect(() => {
+    if (!current.serial || !current.mac) return;
+    const serial = current.serial;
+    const mac    = current.mac;
+    setCurrent({ serial: '', mac: '' });
+
+    const id = `${serial}_${Date.now()}`;
+    const newItem = {
+      _id: id, serial, mac,
+      lookupStatus: 'loading', isExisting: false,
+      glDeviceId: null, deviceType: null, deviceModel: null, partNumber: null,
+      currentSubscriptionKey: null, currentApplicationId: null,
+      currentLocationId: null, currentContactId: null,
+      currentSiteId: null, currentFunctionId: null, currentTags: {},
+    };
+    setQueue(q => [...q, newItem]);
+
+    // Background GL + Central lookup in parallel
+    const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
+    Promise.all([
+      api.glLookupDevice({ serial, ...settings }),
+      api.centralGetDeviceSiteId({ serial, centralToken: settings.centralToken || settings.token, centralUrl }),
+    ]).then(([glResult, centralInfo]) => {
+      const glData = glResult || {};
+      const glType = (glData.deviceType || '').toUpperCase();
+      const mapped = GL_DEVICE_TYPE_MAP[glType] || null;
+      const { siteId, persona } = centralInfo || {};
+      setQueue(q => q.map(qi => qi._id !== id ? qi : {
+        ...qi,
+        lookupStatus: 'done',
+        isExisting: !!glData.id,
+        glDeviceId: glData.id || null,
+        deviceType: mapped,
+        deviceModel: glData.model || glData.deviceModel || null,
+        partNumber: glData.partNumber || null,
+        currentSubscriptionKey: glData._subKey || null,
+        currentApplicationId: glData.application?.id || null,
+        currentLocationId: glData.location?.id || null,
+        currentContactId: glData.contact?.workspaceUser?.id || glData.contact?.id || null,
+        currentTags: glData.tags || {},
+        currentSiteId: siteId || null,
+        currentFunctionId: (persona && persona !== 'None') ? persona : null,
+      }));
+    }).catch(e => {
+      console.warn('[batch lookup]', serial, e.message);
+      setQueue(q => q.map(qi => qi._id !== id ? qi : { ...qi, lookupStatus: 'done' }));
+    });
+  }, [current.serial, current.mac]);
+
+  const processScan = useCallback(raw => {
+    const result = parseBarcode(raw);
+    if (!result.serial && !result.mac) return;
+    setCurrent(prev => ({
+      serial: result.serial || prev.serial,
+      mac:    result.mac    || prev.mac,
+    }));
+  }, []);
+
+  const handleScan = useCallback(raw => {
+    const result = parseBarcode(raw);
+    if (!result.serial && !result.mac) return;
+    if (settings.scanConfirm ?? true) {
+      clearTimeout(confirmTimer.current);
+      setPendingScan(raw);
+      confirmTimer.current = setTimeout(() => { setPendingScan(null); processScan(raw); }, SCAN_CONFIRM_MS);
+    } else {
+      processScan(raw);
+    }
+  }, [settings.scanConfirm, processScan]);
+
+  const hint = !current.serial && !current.mac
+    ? (queue.length > 0 ? 'Scan S/N barcode for next device' : 'Scan device S/N barcode to begin')
+    : !current.serial ? 'MAC captured — now scan Serial Number'
+    : !current.mac    ? `Got ${current.serial} — now scan MAC barcode`
+    : 'Both captured — adding to queue…';
+
+  const removeItem = id => setQueue(q => q.filter(qi => qi._id !== id));
+
+  return (
+    <div className="flex flex-col" style={{ height: 'calc(100vh - 120px)' }}>
+      {/* Title */}
+      <div className="px-5 pt-2 pb-2 flex items-center justify-between shrink-0">
+        <div>
+          <h2 className="text-white font-bold text-xl">Batch Scan</h2>
+          <p className="text-gray-400 text-sm">Scan S/N + MAC for each device</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {settings.demoMode && (
+            <span className="text-xs bg-yellow-500 bg-opacity-20 text-yellow-400 px-2.5 py-1 rounded-full font-semibold">Demo</span>
+          )}
+        </div>
+      </div>
+
+      {/* Camera ~42% */}
+      <div className="px-5 shrink-0" style={{ flex: '0 0 42%' }}>
+        {!cameraErr
+          ? <div className="relative h-full">
+              <BarcodeScanner onScan={handleScan} onCameraError={setCameraErr} continuous />
+              {pendingScan && (() => {
+                const parsed = parseBarcode(pendingScan);
+                return (
+                  <div className="absolute inset-x-0 bottom-0 rounded-b-2xl overflow-hidden"
+                    style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.95) 60%, rgba(0,0,0,0.7) 100%)' }}>
+                    <div className="h-0.5 bg-emerald-500 opacity-60"
+                      style={{ animation: `shrinkWidth ${SCAN_CONFIRM_MS}ms linear forwards` }} />
+                    <div className="px-4 pt-3 pb-3 space-y-2">
+                      {parsed.serial && <p className="text-white text-sm font-mono text-center">S/N: <span className="text-emerald-400 font-bold">{parsed.serial}</span></p>}
+                      {parsed.mac    && <p className="text-white text-sm font-mono text-center">MAC: <span className="text-emerald-400 font-bold">{parsed.mac}</span></p>}
+                      <div className="flex gap-2">
+                        <button onClick={() => { clearTimeout(confirmTimer.current); setPendingScan(null); }}
+                          className="flex-1 py-2 rounded-xl text-sm font-semibold text-gray-300 border border-white border-opacity-20 bg-white bg-opacity-10">✕ Rescan</button>
+                        <button onClick={() => { clearTimeout(confirmTimer.current); setPendingScan(null); processScan(pendingScan); }}
+                          className="flex-1 py-2 rounded-xl text-sm font-semibold text-white bg-emerald-600">✓ Use this</button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+          : <div className="h-full flex items-center"><ErrorBanner msg={cameraErr} /></div>
+        }
+      </div>
+
+      {/* Status line */}
+      <div className={`mx-5 my-2 flex items-center gap-2 rounded-xl px-3 py-2 text-xs shrink-0 ${
+        current.serial
+          ? 'bg-emerald-500 bg-opacity-10 border border-emerald-500 border-opacity-30 text-emerald-300'
+          : 'bg-white bg-opacity-5 text-gray-500'
+      }`}>
+        <span>{current.serial ? '→' : '↑'}</span>
+        <span className="flex-1">{hint}</span>
+        {current.serial && !current.mac && (
+          <span className="font-mono text-emerald-400 font-bold">{current.serial}</span>
+        )}
+      </div>
+
+      {/* Queue — scrollable */}
+      <div className="flex-1 overflow-y-auto px-5 min-h-0">
+        {queue.length === 0
+          ? <div className="flex flex-col items-center py-8 text-center">
+              <p className="text-gray-600 text-sm">No devices scanned yet</p>
+              <p className="text-gray-700 text-xs mt-1">Devices appear here as you scan them</p>
+            </div>
+          : <>
+              <p className="text-gray-600 text-xs uppercase tracking-wider font-semibold pt-1 pb-2">
+                Scanned — {queue.length} device{queue.length !== 1 ? 's' : ''}
+              </p>
+              <div className="space-y-2 pb-2">
+                {queue.map(item => (
+                  <div key={item._id} className="flex items-center gap-3 bg-white bg-opacity-5 border border-white border-opacity-10 rounded-2xl px-4 py-3">
+                    <span className="text-base shrink-0 leading-none">
+                      {item.deviceType === 'AP' ? '📡' : item.deviceType === 'SWITCH' ? '🔀' : item.deviceType === 'GATEWAY' ? '🌐' : '📦'}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-white text-sm font-mono font-semibold">{item.serial}</p>
+                      <p className="text-gray-500 text-xs mt-0.5 truncate">
+                        {item.lookupStatus === 'loading' ? 'Looking up…'
+                          : [item.deviceModel, item.partNumber].filter(Boolean).join(' · ') || 'New device'}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {item.lookupStatus === 'loading'
+                        ? <span className="text-xs px-2 py-0.5 rounded-full bg-white bg-opacity-10 text-gray-500">…</span>
+                        : item.isExisting
+                        ? <span className="text-xs px-2 py-0.5 rounded-full bg-blue-500 bg-opacity-20 text-blue-400 font-semibold">EXISTS</span>
+                        : <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500 bg-opacity-20 text-emerald-400 font-semibold">NEW</span>
+                      }
+                      <button onClick={() => removeItem(item._id)}
+                        className="w-6 h-6 flex items-center justify-center rounded-lg text-gray-600 active:text-red-400 text-sm">✕</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+        }
+      </div>
+
+      {/* Done button */}
+      <div className="px-5 py-3 shrink-0" style={{ borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+        {settings.demoMode && (
+          <div className="mb-2 grid grid-cols-2 gap-2">
+            <button onClick={() => { processScan('SN:TW34KNP1FL;MAC:AA:BB:CC:11:22:33'); }}
+              className="py-2 rounded-xl text-xs font-semibold text-gray-300 bg-white bg-opacity-10">+ AP</button>
+            <button onClick={() => { processScan('SN:SG90KN409P;MAC:BB:CC:DD:44:55:66'); }}
+              className="py-2 rounded-xl text-xs font-semibold text-gray-300 bg-white bg-opacity-10">+ Switch</button>
+          </div>
+        )}
+        <Btn onClick={() => onDone(queue)} disabled={queue.length === 0}>
+          Done ({queue.length} device{queue.length !== 1 ? 's' : ''}) →
+        </Btn>
+      </div>
+    </div>
+  );
+};
+
+// ── SCREEN: BATCH ADDING ──────────────────────────────────────────────────────
+// Adds each queued device to GL sequentially, shows progress per device.
+const BatchAddingScreen = ({ queue, shared, settings, api, onSuccess, onBack }) => {
+  const [results, setResults] = useState([]);
+  const [currentIdx, setCurrentIdx] = useState(0);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    const run = async () => {
+      const res = [];
+      for (let i = 0; i < queue.length; i++) {
+        setCurrentIdx(i);
+        const item = queue[i];
+        try {
+          const device = await api.glAddDevice({
+            serial: item.serial, mac: item.mac,
+            tags: shared.tags,
+            locationId: shared.location?.id,
+            ...settings,
+          });
+          const glType = (device.deviceType || '').toUpperCase();
+          const mapped = GL_DEVICE_TYPE_MAP[glType] || item.deviceType || null;
+          res.push({
+            ...item,
+            status: 'success',
+            glDeviceId: device.id,
+            deviceType: mapped,
+            deviceModel: device.model || device.deviceModel || item.deviceModel || null,
+            partNumber: device.partNumber || item.partNumber || null,
+            foundExisting: device.foundExisting || item.isExisting,
+            // Prefer values from the scan-time GL lookup; fall back to GL add response
+            currentSubscriptionKey: item.currentSubscriptionKey || device._subKey || null,
+            currentFunctionId: item.currentFunctionId || null,
+          });
+        } catch (err) {
+          res.push({ ...item, status: 'error', error: err.message });
+        }
+        setResults([...res]);
+      }
+      setDone(true);
+      onSuccess([...res]);
+    };
+    run();
+  }, []);
+
+  const total = queue.length;
+  const doneCount = results.length;
+
+  return (
+    <div className="p-5 step-enter">
+      <div className="pt-2 mb-5">
+        <h2 className="text-white font-bold text-xl">Adding to GreenLake</h2>
+        <p className="text-gray-400 text-sm">{total} device{total !== 1 ? 's' : ''}</p>
+      </div>
+
+      <div className="w-full h-1.5 bg-white bg-opacity-10 rounded-full mb-5">
+        <div className="h-full bg-emerald-500 rounded-full transition-all duration-500"
+          style={{ width: `${total > 0 ? (doneCount / total) * 100 : 0}%` }} />
+      </div>
+
+      <div className="space-y-2">
+        {queue.map((item, idx) => {
+          const result = results[idx];
+          const isCurrent = !result && idx === currentIdx;
+          const status = result ? (result.status === 'success' ? (result.foundExisting ? 'found' : 'added') : 'error') : (isCurrent ? 'loading' : 'pending');
+          return (
+            <div key={item._id} className="flex items-center gap-3 bg-white bg-opacity-5 rounded-xl px-4 py-3">
+              <div className="w-5 flex justify-center shrink-0">
+                {status === 'pending'  && <span className="text-gray-700 text-lg">·</span>}
+                {status === 'loading'  && <div className="w-4 h-4 rounded-full animate-spin" style={{ border: '2px solid rgba(16,185,129,0.2)', borderTopColor: '#10b981' }} />}
+                {status === 'added'    && <span className="text-emerald-400">✓</span>}
+                {status === 'found'    && <span className="text-blue-400">~</span>}
+                {status === 'error'    && <span className="text-red-400">✕</span>}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-white text-sm font-mono">{item.serial}</p>
+                {status === 'error'  && <p className="text-red-400 text-xs truncate">{result?.error}</p>}
+                {status === 'found'  && <p className="text-blue-300 text-xs">Already in GreenLake — updating</p>}
+                {status === 'added'  && <p className="text-emerald-300 text-xs">Registered successfully</p>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {done && results.filter(r => r.status === 'error').length === results.length && (
+        <div className="mt-5">
+          <ErrorBanner msg="All devices failed. Check credentials and try again." />
+          <div className="mt-3"><Btn variant="secondary" onClick={onBack}>← Go Back</Btn></div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── COMPONENT: BATCH GROUP BANNER ─────────────────────────────────────────────
+// Small contextual banner shown during per-group subscription/function screens
+const BatchGroupBanner = ({ group, groupIdx, totalGroups }) => (
+  <div className="mx-5 mb-3 px-3 py-2 rounded-xl flex items-center gap-2.5"
+    style={{ background: 'rgba(99,102,241,0.1)', border: '1px solid rgba(99,102,241,0.25)' }}>
+    <span className="text-base leading-none shrink-0">
+      {group.deviceType === 'AP' ? '📡' : group.deviceType === 'SWITCH' ? '🔀' : group.deviceType === 'GATEWAY' ? '🌐' : '📦'}
+    </span>
+    <div className="flex-1 min-w-0">
+      <p className="text-indigo-300 text-xs font-semibold truncate">{group.label}</p>
+      <p className="text-indigo-400 text-xs opacity-70">{group.deviceSerials.length} device{group.deviceSerials.length !== 1 ? 's' : ''} · Group {groupIdx + 1} of {totalGroups}</p>
+    </div>
+    {/* Progress dots */}
+    <div className="flex gap-1 shrink-0">
+      {Array.from({ length: totalGroups }).map((_, i) => (
+        <div key={i} className={`w-1.5 h-1.5 rounded-full ${i < groupIdx ? 'bg-indigo-400' : i === groupIdx ? 'bg-indigo-300' : 'bg-indigo-900'}`} />
+      ))}
+    </div>
+  </div>
+);
+
+// ── SCREEN: BATCH REVIEW ──────────────────────────────────────────────────────
+const BatchReviewScreen = ({ queue, groups, shared, onBack, onProvision }) => {
+  const successItems = queue.filter(q => q.status === 'success');
+  const failedItems  = queue.filter(q => q.status === 'error');
+
+  return (
+    <div className="p-5 pb-24 step-enter">
+      <div className="pt-2 mb-5">
+        <h2 className="text-white font-bold text-xl">Review</h2>
+        <p className="text-gray-400 text-sm">{successItems.length} device{successItems.length !== 1 ? 's' : ''} ready to provision</p>
+      </div>
+
+      {failedItems.length > 0 && (
+        <div className="mb-4 bg-yellow-500 bg-opacity-10 border border-yellow-500 border-opacity-30 rounded-2xl px-4 py-3">
+          <p className="text-yellow-400 text-xs font-semibold">⚠️ {failedItems.length} device{failedItems.length !== 1 ? 's' : ''} could not be added to GreenLake and will be skipped.</p>
+        </div>
+      )}
+
+      {/* Shared settings */}
+      <p className="text-gray-500 text-xs uppercase tracking-wider font-semibold mb-2">Shared — all devices</p>
+      <Card className="mb-5 divide-y divide-white divide-opacity-5 space-y-0 py-0">
+        {[
+          ['Location',    shared.location?.name],
+          ['Contact',     shared.contact ? [shared.contact.profile?.firstName, shared.contact.profile?.lastName].filter(Boolean).join(' ') || shared.contact.email : null],
+          ['Tags',        Object.keys(shared.tags || {}).length > 0 ? Object.entries(shared.tags).map(([k,v]) => `${k}: ${v}`).join(', ') : null],
+          ['Application', shared.application?.name],
+          ['Site',        shared.site?.name],
+        ].map(([label, value]) => (
+          <div key={label} className="flex items-start justify-between py-3 gap-4">
+            <span className="text-gray-500 text-sm shrink-0">{label}</span>
+            <span className="text-white text-sm text-right truncate max-w-[200px]">{value || '—'}</span>
+          </div>
+        ))}
+      </Card>
+
+      {/* Per-group */}
+      {groups.map((g, gi) => (
+        <div key={g.key} className="mb-5">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-base">{g.deviceType === 'AP' ? '📡' : g.deviceType === 'SWITCH' ? '🔀' : g.deviceType === 'GATEWAY' ? '🌐' : '📦'}</span>
+            <p className="text-gray-400 text-xs font-semibold uppercase tracking-wider">{g.label} · {g.deviceSerials.length} device{g.deviceSerials.length !== 1 ? 's' : ''}</p>
+          </div>
+          <Card className="mb-2 divide-y divide-white divide-opacity-5 space-y-0 py-0">
+            <div className="flex justify-between py-3"><span className="text-gray-500 text-sm">Subscription</span><span className="text-white text-sm truncate ml-4 max-w-[200px] text-right">{g.subscription?.skuDescription || '—'}</span></div>
+            <div className="flex justify-between py-3"><span className="text-gray-500 text-sm">Function</span><span className="text-white text-sm">{g.deviceFunction ? `${g.deviceFunction.icon} ${g.deviceFunction.label}` : '—'}</span></div>
+          </Card>
+          {g.deviceSerials.map(serial => {
+            const item = queue.find(q => q.serial === serial);
+            if (!item) return null;
+            return (
+              <div key={serial} className="flex items-center gap-3 bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-2.5 mb-1.5">
+                <span className="text-sm">{item.deviceType === 'AP' ? '📡' : item.deviceType === 'SWITCH' ? '🔀' : '📦'}</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-white text-xs font-mono">{item.serial}</p>
+                  <p className="text-gray-600 text-xs">{item.deviceModel || 'Unknown model'}</p>
+                </div>
+                <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ${item.foundExisting ? 'bg-blue-500 bg-opacity-20 text-blue-400' : 'bg-emerald-500 bg-opacity-20 text-emerald-400'}`}>
+                  {item.foundExisting ? 'UPDATE' : 'NEW'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+
+      <div className="fixed bottom-0 left-1/2 -translate-x-1/2 w-full max-w-[480px] px-5 pb-8 pt-3 space-y-2" style={{ background: 'linear-gradient(to top, #111827 70%, transparent)' }}>
+        <Btn onClick={onProvision}>Provision {successItems.length} Device{successItems.length !== 1 ? 's' : ''} →</Btn>
+        <Btn variant="secondary" onClick={onBack}>← Back</Btn>
+      </div>
+    </div>
+  );
+};
+
+// ── SCREEN: BATCH PROVISION ───────────────────────────────────────────────────
+// Provisions all devices sequentially — tags/contact, subscription, app, site, function.
+const BatchProvisionScreen = ({ queue, groups, shared, settings, api, onDone }) => {
+  const [results, setResults] = useState({});   // serial → { tags, sub, app, site, fn }
+  const [currentSerial, setCurrentSerial] = useState(null);
+  const [done, setDone] = useState(false);
+
+  useEffect(() => {
+    const run = async () => {
+      const successItems = queue.filter(q => q.status === 'success');
+      // Build serial → group lookup
+      const groupBySerial = {};
+      for (const g of groups) {
+        for (const serial of g.deviceSerials) groupBySerial[serial] = g;
+      }
+
+      const allResults = {};
+      for (const item of successItems) {
+        setCurrentSerial(item.serial);
+        const steps = { tags: 'pending', sub: 'pending', app: 'pending', site: 'pending', fn: 'pending' };
+        const set = (k, v) => { steps[k] = v; setResults(prev => ({ ...prev, [item.serial]: { ...steps } })); };
+        const group = groupBySerial[item.serial];
+
+        // Tags + contact
+        try {
+          const tagPatch = { ...(shared.tags || {}) };
+          Object.keys(item.currentTags || {}).forEach(k => { if (tagPatch[k] === undefined) tagPatch[k] = null; });
+          const hasTags    = Object.keys(tagPatch).length > 0;
+          const hasContact = !!shared.contact?.id;
+          if (hasTags || hasContact) {
+            set('tags', 'loading');
+            await api.glPatchAttributes({ deviceId: item.glDeviceId, tags: hasTags ? tagPatch : undefined, contact: shared.contact, ...settings });
+          }
+          set('tags', 'success');
+        } catch(e) { set('tags', 'error'); }
+
+        // Subscription
+        const sub = group?.subscription;
+        if (sub?.id) {
+          try { set('sub', 'loading'); await api.glAssignSubscription({ deviceId: item.glDeviceId, subscriptionId: sub.id, ...settings }); set('sub', 'success'); }
+          catch(e) { set('sub', 'error'); }
+        } else { set('sub', 'skipped'); }
+
+        // Application
+        if (shared.application?.id) {
+          try { set('app', 'loading'); await api.glAssignApplication({ deviceId: item.glDeviceId, applicationId: shared.application.id, region: shared.applicationRegion || shared.application.region, ...settings }); set('app', 'success'); }
+          catch(e) { set('app', 'error'); }
+        } else { set('app', 'skipped'); }
+
+        // Site
+        if (shared.site?.id) {
+          try { set('site', 'loading'); await api.centralAssignSite({ serial: item.serial, siteId: shared.site.id, ...settings }); set('site', 'success'); }
+          catch(e) { set('site', e.softFail ? 'skipped' : 'error'); }
+        } else { set('site', 'skipped'); }
+
+        // Function
+        const fn = group?.deviceFunction;
+        if (fn?.id) {
+          try { set('fn', 'loading'); await api.centralAssignFunction({ deviceId: item.glDeviceId, serial: item.serial, persona: fn.id, ...settings }); set('fn', 'success'); }
+          catch(e) { set('fn', e.softFail ? 'skipped' : 'error'); }
+        } else { set('fn', 'skipped'); }
+
+        allResults[item.serial] = { ...steps };
+        setResults({ ...allResults });
+      }
+      setCurrentSerial(null);
+      setDone(true);
+    };
+    run();
+  }, []);
+
+  const successItems = queue.filter(q => q.status === 'success');
+  const doneCount    = Object.keys(results).length;
+  const stepLabels   = [['tags','Tags'],['sub','Sub'],['app','App'],['site','Site'],['fn','Fn']];
+  const stepColor    = v => v === 'success' ? 'bg-emerald-500 bg-opacity-20 text-emerald-400' : v === 'skipped' ? 'bg-white bg-opacity-10 text-gray-600' : v === 'error' ? 'bg-red-500 bg-opacity-20 text-red-400' : v === 'loading' ? 'bg-yellow-500 bg-opacity-20 text-yellow-400' : 'bg-white bg-opacity-5 text-gray-700';
+
+  return (
+    <div className="p-5 step-enter">
+      <div className="pt-2 mb-5">
+        <h2 className="text-white font-bold text-xl">Provisioning</h2>
+        <p className="text-gray-400 text-sm">{done ? 'Complete' : `${doneCount} of ${successItems.length} devices`}</p>
+      </div>
+
+      <div className="w-full h-1.5 bg-white bg-opacity-10 rounded-full mb-5">
+        <div className="h-full bg-emerald-500 rounded-full transition-all duration-500"
+          style={{ width: `${successItems.length ? (doneCount / successItems.length) * 100 : 0}%` }} />
+      </div>
+
+      <div className="space-y-2">
+        {successItems.map(item => {
+          const r = results[item.serial];
+          const isCurrent = item.serial === currentSerial;
+          const allGood = r && Object.values(r).every(v => v === 'success' || v === 'skipped');
+          const hasErr  = r && Object.values(r).some(v => v === 'error');
+          return (
+            <div key={item.serial} className={`bg-white bg-opacity-5 border rounded-xl px-4 py-3 ${isCurrent ? 'border-white border-opacity-20' : 'border-white border-opacity-10'}`}>
+              <div className="flex items-center gap-3 mb-2">
+                <span className="text-sm">{item.deviceType === 'AP' ? '📡' : item.deviceType === 'SWITCH' ? '🔀' : '📦'}</span>
+                <span className="text-white text-sm font-mono flex-1">{item.serial}</span>
+                {isCurrent && <div className="w-3.5 h-3.5 rounded-full animate-spin" style={{ border: '2px solid rgba(16,185,129,0.2)', borderTopColor: '#10b981' }} />}
+                {!isCurrent && allGood && <span className="text-emerald-400 text-sm">✓</span>}
+                {!isCurrent && hasErr  && <span className="text-red-400 text-sm">!</span>}
+              </div>
+              {r && (
+                <div className="flex gap-1.5 flex-wrap">
+                  {stepLabels.map(([key, label]) => (
+                    <span key={key} className={`text-xs px-2 py-0.5 rounded-full ${stepColor(r[key])}`}>{label}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {done && (
+        <div className="mt-6">
+          <Btn onClick={onDone}>Done ✓</Btn>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── SCREEN: BATCH SUCCESS ─────────────────────────────────────────────────────
+const BatchSuccessScreen = ({ queue, onAnother }) => {
+  const items = queue.filter(q => q.status === 'success');
+  return (
+    <div className="p-5 step-enter">
+      <div className="flex flex-col items-center text-center pt-8 pb-6">
+        <div className="w-24 h-24 bg-emerald-500 bg-opacity-20 rounded-full flex items-center justify-center text-5xl mb-5">✓</div>
+        <h2 className="text-white font-bold text-2xl mb-1">Batch Complete!</h2>
+        <p className="text-gray-400 text-base">{items.length} device{items.length !== 1 ? 's' : ''} provisioned</p>
+      </div>
+      <div className="space-y-2 mb-6">
+        {items.map(item => (
+          <div key={item.serial} className="flex items-center gap-3 bg-white bg-opacity-5 rounded-xl px-4 py-3">
+            <span>{item.deviceType === 'AP' ? '📡' : item.deviceType === 'SWITCH' ? '🔀' : '📦'}</span>
+            <div className="flex-1">
+              <p className="text-white text-sm font-mono">{item.serial}</p>
+              <p className="text-gray-500 text-xs">{item.deviceModel || 'Device'}</p>
+            </div>
+            <span className="text-emerald-400">✓</span>
+          </div>
+        ))}
+      </div>
+      <Btn onClick={onAnother}>Onboard More Devices →</Btn>
+    </div>
+  );
+};
+
 // ── APP ────────────────────────────────────────────────────────────────────────
 const STEPS = ['scan','tags','location','contact','adding_gl','device_type','subscription','application','site','function','review'];
 // device_type is a fallback screen — give it the same progress value as subscription so the bar doesn't jump.
@@ -2746,6 +3334,11 @@ const App = () => {
   });
   const [summary, setSummary] = useState({});
   const [tokenError, setTokenError] = useState(null);
+  // Batch mode state
+  const [batchQueue, setBatchQueue]       = useState([]);
+  const [batchGroups, setBatchGroups]     = useState([]);
+  const [batchGroupIdx, setBatchGroupIdx] = useState(0);
+  const [batchShared, setBatchShared]     = useState({});
   const glTokenRef = useRef({ token: null, expiry: 0 });
 
   const upd = patch => setSummary(p => ({ ...p, ...patch }));
@@ -2803,9 +3396,10 @@ const App = () => {
     setScreen('scan');
   };
 
-  const showProgress = !['settings','success','boot'].includes(screen);
+  const isBatch = screen.startsWith('batch_');
+  const showProgress = !isBatch && !['settings','success','boot'].includes(screen);
   const currentStep = STEP_PROGRESS[screen] ?? 0;
-  const backTarget = {
+  const backTarget = isBatch ? null : ({
     tags:        'scan',
     location:    'tags',
     contact:     'location',
@@ -2814,7 +3408,27 @@ const App = () => {
     function:    'site',
     review:      summary.deviceType === 'UXI' ? 'application' : 'function',
     settings:    'scan',
-  }[screen] ?? null;
+  }[screen] ?? null);
+
+  // Batch back navigation — some are dynamic (group cycling), handled in components
+  const batchBack = () => {
+    switch(screen) {
+      case 'batch_scan':         setScreen('scan'); break;
+      case 'batch_tags':         setScreen('batch_scan'); break;
+      case 'batch_location':     setScreen('batch_tags'); break;
+      case 'batch_contact':      setScreen('batch_location'); break;
+      case 'batch_subscription':
+        if (batchGroupIdx > 0) { setBatchGroupIdx(i => i - 1); setScreen('batch_function'); }
+        else setScreen('batch_adding_gl');
+        break;
+      case 'batch_function':     setScreen('batch_subscription'); break;
+      case 'batch_application':  setScreen(batchGroups.length > 0 ? 'batch_function' : 'batch_adding_gl'); break;
+      case 'batch_site':         setScreen('batch_application'); break;
+      case 'batch_review':       setScreen('batch_site'); break;
+      default: break;
+    }
+  };
+  const showBatchBack = isBatch && !['batch_adding_gl','batch_provisioning','batch_success'].includes(screen);
 
   const [liveSettings, setLiveSettings] = useState(settings);
   const enterScreen = useCallback(async (next) => {
@@ -2841,8 +3455,8 @@ const App = () => {
       {screen !== 'welcome' && <div className="sticky top-0 z-20 pt-safe" style={{ background: '#111827' }}>
         <div className="flex items-center gap-3 px-5 pt-12 pb-3">
           <button
-            onClick={backTarget ? () => setScreen(backTarget) : undefined}
-            className={`p-1.5 rounded-lg shrink-0 transition-all duration-200 ${backTarget ? 'text-gray-400 hover:text-white hover:bg-white hover:bg-opacity-10 opacity-100' : 'opacity-0 pointer-events-none'}`}
+            onClick={(backTarget || showBatchBack) ? (isBatch ? batchBack : () => setScreen(backTarget)) : undefined}
+            className={`p-1.5 rounded-lg shrink-0 transition-all duration-200 ${(backTarget || showBatchBack) ? 'text-gray-400 hover:text-white hover:bg-white hover:bg-opacity-10 opacity-100' : 'opacity-0 pointer-events-none'}`}
             title="Go back"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
@@ -2873,8 +3487,11 @@ const App = () => {
           </div>
         </div>
         {showProgress && <ProgressSteps step={currentStep} total={TOTAL_STEPS} />}
-        {summary.deviceType && !['scan','tags','location','contact','adding_gl','settings','success','boot'].includes(screen) && (
+        {summary.deviceType && !isBatch && !['scan','tags','location','contact','adding_gl','settings','success','boot'].includes(screen) && (
           <DeviceChip deviceType={summary.deviceType} model={summary.deviceModel} partNumber={summary.devicePartNumber} serial={summary.serial} />
+        )}
+        {isBatch && ['batch_subscription','batch_function'].includes(screen) && batchGroups[batchGroupIdx] && (
+          <BatchGroupBanner group={batchGroups[batchGroupIdx]} groupIdx={batchGroupIdx} totalGroups={batchGroups.length} />
         )}
       </div>}
 
@@ -2904,6 +3521,7 @@ const App = () => {
               </div>
             )}
             <ScanScreen settings={liveSettings}
+              onBatch={() => enterScreen('batch_scan')}
               onScanned={(d, raw) => {
                 upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null, currentSiteId: null, currentFunctionId: null });
                 // Background lookups — fetch a fresh token first so lookups don't fail
@@ -3062,6 +3680,159 @@ const App = () => {
         {screen === 'success' && (
           <SuccessScreen summary={summary}
             onAnother={() => { setSummary({}); enterScreen('scan'); }} />
+        )}
+
+        {/* ── BATCH SCREENS ───────────────────────────── */}
+
+        {screen === 'batch_scan' && (
+          <BatchScanScreen settings={liveSettings} api={api}
+            onBack={() => setScreen('scan')}
+            onDone={queue => {
+              setBatchQueue(queue);
+              setBatchShared({});
+              enterScreen('batch_tags');
+            }} />
+        )}
+
+        {screen === 'batch_tags' && (
+          <TagsScreen settings={liveSettings} api={api}
+            initialTags={
+              Object.keys(batchShared.currentTags || {}).length > 0
+                ? batchShared.currentTags
+                : (() => { try { return JSON.parse(localStorage.getItem('aruba_last_tags')); } catch(e) { return null; } })()
+            }
+            onNext={tags => {
+              if (Object.keys(tags).length > 0) localStorage.setItem('aruba_last_tags', JSON.stringify(tags));
+              setBatchShared(s => ({ ...s, tags }));
+              enterScreen('batch_location');
+            }} />
+        )}
+
+        {screen === 'batch_location' && (
+          <LocationScreen settings={liveSettings} api={api}
+            initialId={localStorage.getItem('aruba_last_location')}
+            onNext={loc => {
+              if (loc?.id) localStorage.setItem('aruba_last_location', String(loc.id));
+              setBatchShared(s => ({ ...s, location: loc }));
+              enterScreen('batch_contact');
+            }} />
+        )}
+
+        {screen === 'batch_contact' && (
+          <ContactScreen settings={liveSettings} api={api}
+            initialId={localStorage.getItem('aruba_last_contact')}
+            onSelect={contact => {
+              if (contact?.id) localStorage.setItem('aruba_last_contact', String(contact.id));
+              setBatchShared(s => ({ ...s, contact }));
+              enterScreen('batch_adding_gl');
+            }}
+            onSkip={() => { setBatchShared(s => ({ ...s, contact: null })); enterScreen('batch_adding_gl'); }} />
+        )}
+
+        {screen === 'batch_adding_gl' && (
+          <BatchAddingScreen
+            queue={batchQueue}
+            shared={batchShared}
+            settings={liveSettings} api={api}
+            onBack={() => setScreen('batch_contact')}
+            onSuccess={results => {
+              setBatchQueue(results);
+              const groups = computeBatchGroups(results);
+              setBatchGroups(groups);
+              setBatchGroupIdx(0);
+              // If no successful devices, stay and show error
+              if (results.filter(r => r.status === 'success').length === 0) return;
+              if (groups.length > 0) {
+                enterScreen('batch_subscription');
+              } else {
+                enterScreen('batch_application');
+              }
+            }} />
+        )}
+
+        {screen === 'batch_subscription' && batchGroups[batchGroupIdx] && (
+          <SubscriptionScreen settings={liveSettings} api={api}
+            deviceType={batchGroups[batchGroupIdx].deviceType}
+            initialKey={batchGroups[batchGroupIdx].currentSubscriptionKey || localStorage.getItem('aruba_last_sub')}
+            onSelect={sub => {
+              if (sub?.key) localStorage.setItem('aruba_last_sub', sub.key);
+              setBatchGroups(prev => prev.map((g, i) => i === batchGroupIdx ? { ...g, subscription: sub } : g));
+              enterScreen('batch_function');
+            }}
+            onSkip={() => {
+              setBatchGroups(prev => prev.map((g, i) => i === batchGroupIdx ? { ...g, subscription: null } : g));
+              enterScreen('batch_function');
+            }} />
+        )}
+
+        {screen === 'batch_function' && batchGroups[batchGroupIdx] && (
+          <FunctionScreen
+            deviceType={batchGroups[batchGroupIdx].deviceType}
+            initialId={batchGroups[batchGroupIdx].currentFunctionId || localStorage.getItem('aruba_last_function')}
+            onSelect={fn => {
+              if (fn?.id) localStorage.setItem('aruba_last_function', fn.id);
+              setBatchGroups(prev => prev.map((g, i) => i === batchGroupIdx ? { ...g, deviceFunction: fn } : g));
+              if (batchGroupIdx < batchGroups.length - 1) {
+                setBatchGroupIdx(i => i + 1);
+                enterScreen('batch_subscription');
+              } else {
+                enterScreen('batch_application');
+              }
+            }}
+            onSkip={() => {
+              setBatchGroups(prev => prev.map((g, i) => i === batchGroupIdx ? { ...g, deviceFunction: null } : g));
+              if (batchGroupIdx < batchGroups.length - 1) {
+                setBatchGroupIdx(i => i + 1);
+                enterScreen('batch_subscription');
+              } else {
+                enterScreen('batch_application');
+              }
+            }} />
+        )}
+
+        {screen === 'batch_application' && (
+          <ApplicationScreen settings={liveSettings} api={api}
+            deviceType={batchGroups[0]?.deviceType || null}
+            initialId={null}
+            onSelect={app => {
+              setBatchShared(s => ({ ...s, application: app, applicationRegion: app.region }));
+              enterScreen('batch_site');
+            }} />
+        )}
+
+        {screen === 'batch_site' && (
+          <SiteScreen settings={liveSettings} api={api}
+            initialId={localStorage.getItem('aruba_last_site')}
+            onSelect={site => {
+              localStorage.setItem('aruba_last_site', String(site.id));
+              setBatchShared(s => ({ ...s, site }));
+              enterScreen('batch_review');
+            }}
+            onSkip={() => { setBatchShared(s => ({ ...s, site: null })); enterScreen('batch_review'); }} />
+        )}
+
+        {screen === 'batch_review' && (
+          <BatchReviewScreen
+            queue={batchQueue}
+            groups={batchGroups}
+            shared={batchShared}
+            onBack={() => setScreen('batch_site')}
+            onProvision={() => enterScreen('batch_provisioning')} />
+        )}
+
+        {screen === 'batch_provisioning' && (
+          <BatchProvisionScreen
+            queue={batchQueue}
+            groups={batchGroups}
+            shared={batchShared}
+            settings={liveSettings} api={api}
+            onDone={() => setScreen('batch_success')} />
+        )}
+
+        {screen === 'batch_success' && (
+          <BatchSuccessScreen
+            queue={batchQueue}
+            onAnother={() => { setBatchQueue([]); setBatchGroups([]); setBatchShared({}); setBatchGroupIdx(0); enterScreen('scan'); }} />
         )}
       </div>
     </div>
