@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518h -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518i -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2928,7 +2928,7 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
       </div>
 
       {/* Camera ~42% */}
-      <div className="px-5 shrink-0" style={{ height: 180, overflow: 'hidden' }}>
+      <div className="px-5 shrink-0" style={{ height: 280, overflow: 'hidden' }}>
         {!cameraErr
           ? <div className="relative h-full">
               <BarcodeScanner onScan={handleScan} onCameraError={setCameraErr} continuous />
