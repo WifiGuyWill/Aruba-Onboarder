@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260517a -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260517b -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2812,7 +2812,7 @@ function computeBatchGroups(results) {
 
 // ── SCREEN: BATCH SCAN ────────────────────────────────────────────────────────
 // Layout 1: camera top ~55%, status line, scrollable queue list below
-const BatchScanScreen = ({ settings, api, onDone, onBack }) => {
+const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
   const [queue, setQueue]           = useState([]);
   const [current, setCurrent]       = useState({ serial: '', mac: '' });
   const [pendingScan, setPendingScan] = useState(null);
@@ -2919,6 +2919,10 @@ const BatchScanScreen = ({ settings, api, onDone, onBack }) => {
         <div className="flex items-center gap-2">
           {settings.demoMode && (
             <span className="text-xs bg-yellow-500 bg-opacity-20 text-yellow-400 px-2.5 py-1 rounded-full font-semibold">Demo</span>
+          )}
+          {onOpenSettings && (
+            <button onClick={onOpenSettings}
+              className="w-9 h-9 bg-white bg-opacity-10 rounded-xl flex items-center justify-center text-base">⚙️</button>
           )}
         </div>
       </div>
@@ -3204,34 +3208,44 @@ const BatchGroupBanner = ({ group, groupIdx, totalGroups }) => (
 // Optional — user enters a pattern; skip is the default / primary action.
 const BatchHostnameScreen = ({ queue, onNext, onSkip }) => {
   const [pattern, setPattern] = useState('');
+  const [names, setNames]     = useState({});   // serial → hostname (pre-filled by pattern, editable)
   const successItems = queue.filter(q => q.status === 'success');
 
-  // Validate: no spaces, only hostname-safe chars + our tokens
-  const stripped = pattern.replace(/\{[^}]*\}/g, 'X'); // remove tokens before checking
-  const invalid = stripped.length > 0 && !/^[a-zA-Z0-9\-X]+$/.test(stripped);
-  const preview = pattern.trim()
-    ? successItems.map((item, i) => ({
-        serial: item.serial,
-        model: item.deviceModel || item.partNumber || '—',
-        name: generateHostname(pattern.trim(), item, i + 1),
-      }))
-    : [];
+  // Validate pattern: no spaces, only hostname-safe chars + our tokens
+  const stripped = pattern.replace(/\{[^}]*\}/g, 'X');
+  const patternInvalid = stripped.length > 0 && !/^[a-zA-Z0-9\-X]+$/.test(stripped);
 
-  const canApply = pattern.trim().length > 0 && !invalid && preview.length > 0;
+  // When pattern changes and is valid, pre-fill the per-device name inputs
+  useEffect(() => {
+    if (!pattern.trim() || patternInvalid) return;
+    setNames(prev => {
+      const next = { ...prev };
+      successItems.forEach((item, i) => {
+        next[item.serial] = generateHostname(pattern.trim(), item, i + 1);
+      });
+      return next;
+    });
+  }, [pattern]);
+
+  const setName = (serial, val) =>
+    setNames(prev => ({ ...prev, [serial]: val.replace(/\s/g, '-') }));
+
+  const anySet = successItems.some(item => (names[item.serial] || '').trim());
 
   const handleApply = () => {
     const hostnames = {};
-    successItems.forEach((item, i) => {
-      hostnames[item.serial] = generateHostname(pattern.trim(), item, i + 1);
-    });
-    onNext({ hostnames, hostnamePattern: pattern.trim() });
+    for (const item of successItems) {
+      const n = (names[item.serial] || '').trim();
+      if (n) hostnames[item.serial] = n;
+    }
+    onNext({ hostnames, hostnamePattern: pattern.trim() || null });
   };
 
   return (
     <div className="p-5 pb-8 step-enter">
       <div className="pt-2 mb-4">
-        <h2 className="text-white font-bold text-xl">Hostname Pattern</h2>
-        <p className="text-gray-400 text-sm">Optional — assign names to all devices at once</p>
+        <h2 className="text-white font-bold text-xl">Hostnames</h2>
+        <p className="text-gray-400 text-sm">Optional — name devices via pattern or individually</p>
       </div>
 
       {/* API limitation warning */}
@@ -3240,60 +3254,63 @@ const BatchHostnameScreen = ({ queue, onNext, onSkip }) => {
         <p className="text-amber-300 text-xs leading-relaxed">Hostname assignment only works for devices already provisioned in New Central with a site assigned. Devices just added will be skipped — set those manually in Aruba Central.</p>
       </div>
 
-      {/* Skip is the primary / easy action */}
+      {/* Skip is the easy primary action */}
       <Btn onClick={onSkip} className="mb-5">Skip →</Btn>
 
-      {/* Divider */}
-      <div className="flex items-center gap-3 mb-5">
+      {/* ── PATTERN SECTION ── */}
+      <div className="flex items-center gap-3 mb-4">
         <div className="flex-1 h-px bg-white bg-opacity-10" />
-        <span className="text-gray-600 text-xs">or set a pattern</span>
+        <span className="text-gray-600 text-xs">fill by pattern</span>
         <div className="flex-1 h-px bg-white bg-opacity-10" />
       </div>
 
-      {/* Pattern input */}
       <div className="space-y-2 mb-3">
-        <label className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Pattern</label>
         <input
           value={pattern}
           onChange={e => setPattern(e.target.value)}
           placeholder="e.g. AP-Floor-{N:02}"
-          className={`w-full bg-white bg-opacity-5 border rounded-xl px-4 py-3.5 text-white placeholder-gray-700 focus:outline-none text-sm font-mono transition-colors ${invalid ? 'border-red-500 border-opacity-60 focus:border-red-500' : 'border-white border-opacity-10 focus:border-emerald-500'}`}
+          className={`w-full bg-white bg-opacity-5 border rounded-xl px-4 py-3 text-white placeholder-gray-700 focus:outline-none text-sm font-mono transition-colors ${patternInvalid ? 'border-red-500 border-opacity-60 focus:border-red-500' : 'border-white border-opacity-10 focus:border-emerald-500'}`}
         />
-        {invalid && <p className="text-red-400 text-xs">Only letters, numbers, dashes, and pattern tokens allowed</p>}
+        {patternInvalid && <p className="text-red-400 text-xs">Only letters, numbers, dashes, and pattern tokens allowed</p>}
       </div>
-
-      {/* Token reference */}
       <div className="flex flex-wrap gap-1.5 mb-5">
-        {['{N}','  {N:02}','{N:03}','{SERIAL}','{MODEL}','{PART}'].map(t => (
-          <button key={t} onClick={() => setPattern(p => p + t.trim())}
+        {['{N}','{N:02}','{N:03}','{SERIAL}','{MODEL}','{PART}'].map(t => (
+          <button key={t} onClick={() => setPattern(p => p + t)}
             className="px-2 py-1 text-xs font-mono bg-white bg-opacity-5 border border-white border-opacity-10 rounded-lg text-gray-400 active:bg-opacity-10">
-            {t.trim()}
+            {t}
           </button>
         ))}
       </div>
 
-      {/* Live preview */}
-      {preview.length > 0 && (
-        <div className="mb-5">
-          <p className="text-gray-500 text-xs uppercase tracking-wider font-semibold mb-2">Preview</p>
-          <div className="space-y-1.5">
-            {preview.slice(0, 6).map(p => (
-              <div key={p.serial} className="flex items-center gap-3 bg-white bg-opacity-5 rounded-xl px-3 py-2">
-                <span className="text-gray-500 text-xs font-mono flex-1 truncate">{p.serial}</span>
-                <span className="text-gray-600 text-xs">→</span>
-                <span className="text-emerald-300 text-xs font-mono font-semibold">{p.name}</span>
-              </div>
-            ))}
-            {preview.length > 6 && (
-              <p className="text-gray-600 text-xs text-center">…and {preview.length - 6} more</p>
-            )}
-          </div>
-        </div>
-      )}
+      {/* ── PER-DEVICE INPUTS ── */}
+      <div className="flex items-center gap-3 mb-4">
+        <div className="flex-1 h-px bg-white bg-opacity-10" />
+        <span className="text-gray-600 text-xs">or set individually</span>
+        <div className="flex-1 h-px bg-white bg-opacity-10" />
+      </div>
 
-      {/* Apply button — secondary action */}
-      <Btn variant="secondary" onClick={handleApply} disabled={!canApply}>
-        Apply Pattern →
+      <div className="space-y-2 mb-5">
+        {successItems.map((item, i) => {
+          const icon = item.deviceType === 'AP' ? '📡' : item.deviceType === 'SWITCH' ? '🔀' : item.deviceType === 'GATEWAY' ? '🌐' : '📦';
+          const val = names[item.serial] || '';
+          const nameInvalid = val.length > 0 && !/^[a-zA-Z0-9\-]+$/.test(val);
+          return (
+            <div key={item.serial} className="flex items-center gap-2">
+              <span className="text-base shrink-0">{icon}</span>
+              <span className="text-gray-500 text-xs font-mono w-24 shrink-0 truncate">{item.serial}</span>
+              <input
+                value={val}
+                onChange={e => setName(item.serial, e.target.value)}
+                placeholder={`device-${String(i+1).padStart(2,'0')}`}
+                className={`flex-1 bg-white bg-opacity-5 border rounded-xl px-3 py-2 text-white placeholder-gray-700 focus:outline-none text-xs font-mono transition-colors ${nameInvalid ? 'border-red-500 border-opacity-60' : val ? 'border-emerald-500 border-opacity-40' : 'border-white border-opacity-10 focus:border-emerald-500'}`}
+              />
+            </div>
+          );
+        })}
+      </div>
+
+      <Btn onClick={handleApply} disabled={!anySet}>
+        Apply Hostnames →
       </Btn>
     </div>
   );
@@ -3742,6 +3759,7 @@ const App = () => {
         {screen === 'scan' && liveSettings.batchMode && (
           <BatchScanScreen settings={liveSettings} api={api}
             onBack={null}
+            onOpenSettings={() => setScreen('settings')}
             onDone={queue => {
               setBatchQueue(queue);
               setBatchShared({});
