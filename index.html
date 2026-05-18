@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518d -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518e -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2974,8 +2974,12 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
       <div className="px-5 shrink-0">
         <button
           onClick={() => setManualOpen(o => !o)}
-          className="w-full flex items-center justify-between py-1.5 text-xs transition-colors"
-          style={{ color: manualOpen ? '#10b981' : '#4b5563' }}
+          className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs transition-colors"
+          style={{
+            background: manualOpen ? 'rgba(16,185,129,0.08)' : 'rgba(255,255,255,0.05)',
+            border: `1px solid ${manualOpen ? 'rgba(16,185,129,0.25)' : 'rgba(255,255,255,0.08)'}`,
+            color: manualOpen ? '#10b981' : '#9ca3af',
+          }}
         >
           <span>⌨️ Enter serial manually</span>
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"
