@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260519a -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260519b -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2924,6 +2924,13 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
         </div>
       </div>
 
+      {/* Demo mode banner */}
+      {settings.demoMode && (
+        <div className="mx-5 mb-2 flex items-center gap-2 bg-yellow-500 bg-opacity-10 border border-yellow-500 border-opacity-25 rounded-xl px-3 py-2.5 shrink-0">
+          <span className="text-yellow-400 text-xs font-semibold">🧪 Demo Mode — no real API calls</span>
+        </div>
+      )}
+
       {/* Camera — fixed height container, overflow-hidden clips library's oversized video */}
       <div className="px-5 shrink-0" style={{ height: '38dvh', minHeight: 200, maxHeight: 300 }}>
         {!cameraErr
@@ -2953,13 +2960,6 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
           : <div className="h-full flex items-center"><ErrorBanner msg={cameraErr} /></div>
         }
       </div>
-
-      {/* Demo mode banner */}
-      {settings.demoMode && (
-        <div className="mx-5 mt-2 flex items-center gap-2 bg-yellow-500 bg-opacity-10 border border-yellow-500 border-opacity-25 rounded-xl px-3 py-2.5 shrink-0">
-          <span className="text-yellow-400 text-xs font-semibold">🧪 Demo Mode — no real API calls</span>
-        </div>
-      )}
 
       {/* Status line */}
       <div className={`mx-5 my-2 flex items-center gap-2 rounded-xl px-3 py-2 text-xs shrink-0 ${
