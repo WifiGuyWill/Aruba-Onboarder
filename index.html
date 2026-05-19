@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260519c -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260519d -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -154,6 +154,19 @@ const unifiedTokenUrl = workspaceId =>
   `https://global.api.greenlake.hpe.com/authorization/v2/oauth2/${workspaceId}/token`;
 const delay = ms => new Promise(r => setTimeout(r, ms));
 
+// ── ERROR HELPERS ──────────────────────────────────────────────────────────────
+// Detect HTML error pages (CloudFront, nginx, etc.) returned instead of JSON
+// and replace them with a readable message.
+function parseApiError(raw) {
+  const s = (raw || '').trim();
+  const isHtml = s.startsWith('<!') || /^<html/i.test(s) || /^<HTML/i.test(s);
+  if (!isHtml) return s;
+  if (s.includes('403')) return 'GreenLake rejected the request (403) — your Workspace ID is likely incorrect, or these credentials don\'t have permission for this workspace. Check Settings.';
+  if (s.includes('401')) return 'GreenLake rejected the request (401) — invalid credentials. Check your Client ID and Secret in Settings.';
+  if (s.includes('404')) return 'GreenLake endpoint not found (404) — check your Workspace ID.';
+  return 'GreenLake returned an unexpected error page. Check your Workspace ID and credentials in Settings.';
+}
+
 // ── PROXY CALL ─────────────────────────────────────────────────────────────────
 // All API traffic goes through /proxy to avoid CORS
 async function proxyCall({ url, method = 'GET', token, body, contentType = 'application/json', extraHeaders = {} }) {
@@ -299,7 +312,7 @@ const liveApi = {
       const errBody = await res.text();
       // Auth failures: throw immediately — a device lookup would also fail.
       if (res.status === 401 || res.status === 403) {
-        throw new Error(`Add device error ${res.status}: ${errBody}`);
+        throw new Error(parseApiError(errBody) || `Add device error ${res.status}`);
       }
       // Any other failure (409 conflict, 400, 5xx…): the device may already
       // exist in GreenLake. Try to find it by serial before giving up.
@@ -350,9 +363,12 @@ const liveApi = {
       // Device not found — surface the original POST error.
       const allowHdr = res.headers.get('allow');
       const wwwAuth  = res.headers.get('www-authenticate');
-      let msg = `Add device error ${res.status}: ${errBody}`;
-      if (allowHdr) msg += ` [Allow: ${allowHdr}]`;
-      if (wwwAuth)  msg += ` [WWW-Authenticate: ${wwwAuth}]`;
+      let msg = parseApiError(errBody) || `Add device error ${res.status}`;
+      if (!msg.startsWith('GreenLake')) {
+        msg = `Add device error ${res.status}: ${msg}`;
+        if (allowHdr) msg += ` [Allow: ${allowHdr}]`;
+        if (wwwAuth)  msg += ` [WWW-Authenticate: ${wwwAuth}]`;
+      }
       throw new Error(msg);
     }
     return res.json();
@@ -1373,10 +1389,24 @@ const BarcodeScanner = ({ onScan, onCameraError, continuous = false }) => {
 };
 
 // ── SCREEN: SETTINGS ──────────────────────────────────────────────────────────
-const SettingsScreen = ({ settings, onSave, onBack }) => {
+const SettingsScreen = ({ settings, onSave, onBack, onValidate }) => {
   const [s, setS] = useState({ ...settings });
-  const set = k => v => setS(p => ({ ...p, [k]: v }));
+  const set = k => v => { setS(p => ({ ...p, [k]: v })); setValidation(null); };
   const clusterOptions = CLUSTERS.map(c => ({ value: c.id, label: `${c.label} (${c.url})` }));
+  const [validating, setValidating] = useState(false);
+  const [validation, setValidation] = useState(null); // null | { ok: true } | { ok: false, reason }
+
+  const handleSave = async () => {
+    if (s.demoMode) { onSave(s); return; }
+    setValidating(true);
+    setValidation(null);
+    const result = await onValidate(s.glClientId, s.glClientSecret, s.workspaceId);
+    setValidating(false);
+    setValidation(result);
+    if (result.ok) {
+      setTimeout(() => onSave(s), 800); // brief pause so user sees the ✓
+    }
+  };
 
   return (
     <div className="p-5 space-y-5 step-enter">
@@ -1420,10 +1450,22 @@ const SettingsScreen = ({ settings, onSave, onBack }) => {
         </>
       )}
 
-      <Btn onClick={() => onSave(s)} disabled={!s.demoMode && (
+      {validation && !validation.ok && (
+        <div className="p-3 rounded-xl bg-red-900/40 border border-red-500/40">
+          <p className="text-red-400 text-xs font-semibold mb-1">⚠️ Credentials Invalid</p>
+          <p className="text-red-300 text-xs leading-relaxed">{validation.reason}</p>
+        </div>
+      )}
+      {validation?.ok && (
+        <div className="p-3 rounded-xl bg-emerald-900/40 border border-emerald-500/40">
+          <p className="text-emerald-400 text-xs font-semibold">✓ Credentials verified — saving…</p>
+        </div>
+      )}
+
+      <Btn onClick={handleSave} disabled={validating || (!s.demoMode && (
         !s.glClientId?.trim() || !s.glClientSecret?.trim() || !s.workspaceId?.trim()
-      )}>
-        Save & Continue
+      ))}>
+        {validating ? 'Verifying credentials…' : 'Save & Continue'}
       </Btn>
     </div>
   );
@@ -2685,7 +2727,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
         Object.keys(n).forEach(k => { if (n[k] === 'loading') n[k] = 'error'; });
         return n;
       });
-      setErrorMsg(err.message);
+      setErrorMsg(parseApiError(err.message));
       setSubmitting(false);
     }
   };
@@ -3639,6 +3681,23 @@ const App = () => {
   // Scroll to top on every screen change so sticky header never covers content
   useEffect(() => { window.scrollTo(0, 0); }, [screen]);
 
+  // Validate GL credentials by fetching a token then making one lightweight API call.
+  // Returns { ok: true } or { ok: false, reason: string }
+  const validateCredentials = useCallback(async (clientId, clientSecret, workspaceId) => {
+    try {
+      const wsId = workspaceId?.trim();
+      const url  = wsId ? unifiedTokenUrl(wsId) : TOKEN_URL;
+      const { token } = await fetchToken(clientId, clientSecret, 'Validation', url, !!wsId);
+      // Token OK — now confirm the workspace ID works with a cheap device list call
+      const res = await proxyCall({ url: `${GL_BASE}/devices/v1/devices?limit=1`, token });
+      if (res.ok || res.status === 404) return { ok: true };
+      const body = await res.text();
+      return { ok: false, reason: parseApiError(body) || `API returned ${res.status}` };
+    } catch (e) {
+      return { ok: false, reason: parseApiError(e.message) || e.message };
+    }
+  }, []);
+
   const saveSettings = s => {
     const toStore = {
       glClientId: s.glClientId, glClientSecret: s.glClientSecret, workspaceId: s.workspaceId,
@@ -3770,6 +3829,7 @@ const App = () => {
 
         {screen === 'settings' && (
           <SettingsScreen settings={settings} onSave={saveSettings}
+            onValidate={validateCredentials}
             onBack={summary.serial ? () => setScreen('scan') : null} />
         )}
 
