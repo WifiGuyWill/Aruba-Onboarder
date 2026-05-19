@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518m -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260518n -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2901,9 +2901,9 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
   }, [settings.scanConfirm, processScan]);
 
   const hint = !current.serial && !current.mac
-    ? (queue.length > 0 ? 'Scan S/N barcode for next device' : 'Scan device S/N barcode to begin')
-    : !current.serial ? 'MAC captured — now scan Serial Number'
-    : !current.mac    ? `Got ${current.serial} — now scan MAC barcode`
+    ? 'Scan one barcode at a time — S/N or MAC, either order'
+    : !current.serial ? 'MAC captured — now scan the Serial Number barcode'
+    : !current.mac    ? `Serial captured — now scan the MAC barcode`
     : 'Both captured — adding to queue…';
 
   const removeItem = id => setQueue(q => q.filter(qi => qi._id !== id));
