@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520e -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520f -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1125,9 +1125,12 @@ const liveApi = {
               serial:           match.scopeName || serial,
               status:           match.status || match.connectionStatus || match.device_status || null,
               firmware_version: match.firmware || match.firmwareVersion || match.firmware_version || null,
-              name:             match.name || match.hostname || match.deviceName || null,
-              ip_address:       match.ip || match.ipAddress || match.ip_address || null,
+              name:             match.hostname || match.deviceName || null, // skip MAC-based 'name' field
+              ip_address:       match.ipv4 || match.ip || match.ipAddress || match.ip_address || null,
               model:            match.model || match.deviceModel || null,
+              siteName:         match.siteName || null,
+              deployment:       match.deployment || null,
+              mac:              match.mac || null,
             };
           }
         }
@@ -2715,10 +2718,14 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
 
     Promise.all([statsPromise, sitesPromise]).then(([d, sites]) => {
       setStats(d);
+      let resolvedName = null;
       if (summary.currentSiteId && sites?.length) {
         const match = sites.find(s => String(s.id) === String(summary.currentSiteId));
-        if (match) setSiteName(match.name);
+        if (match) resolvedName = match.name;
       }
+      // NRM device data includes siteName directly — use as fallback
+      if (!resolvedName && d?.siteName) resolvedName = d.siteName;
+      if (resolvedName) setSiteName(resolvedName);
       setLoading(false);
     });
   }, []);
@@ -2796,6 +2803,18 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
                   <div className="col-span-2">
                     <p className="text-gray-500 mb-0.5">IP Address</p>
                     <p className="text-white font-mono font-medium">{stats.ip_address}</p>
+                  </div>
+                )}
+                {stats.mac && (
+                  <div className="col-span-2">
+                    <p className="text-gray-500 mb-0.5">MAC Address</p>
+                    <p className="text-white font-mono font-medium">{stats.mac}</p>
+                  </div>
+                )}
+                {stats.deployment && (
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Deployment</p>
+                    <p className="text-white font-medium">{stats.deployment}</p>
                   </div>
                 )}
               </div>
