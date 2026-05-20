@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520c -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520d -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1061,34 +1061,51 @@ const liveApi = {
     try {
       const type = (deviceType || '').toUpperCase();
       let paths = [];
+      const s = encodeURIComponent(serial);
       if (type === 'AP' || type === 'IAP') {
         paths = [
-          `/monitoring/v2/aps?serial=${encodeURIComponent(serial)}`,
-          `/monitoring/v1/aps/${encodeURIComponent(serial)}`,
+          `/monitoring/v1/aps?serial=${s}`,        // v1 query param — most reliable
+          `/monitoring/v2/aps?serial=${s}`,
+          `/monitoring/v1/aps/${s}`,                // v1 path param
         ];
       } else if (type === 'SWITCH') {
         paths = [
-          `/monitoring/v2/switches?serial=${encodeURIComponent(serial)}`,
-          `/monitoring/v1/switches/${encodeURIComponent(serial)}`,
+          `/monitoring/v1/switches?serial=${s}`,
+          `/monitoring/v2/switches?serial=${s}`,
+          `/monitoring/v1/switches/${s}`,
         ];
       } else if (type === 'GATEWAY') {
         paths = [
-          `/monitoring/v2/gateways?serial=${encodeURIComponent(serial)}`,
-          `/monitoring/v1/gateways/${encodeURIComponent(serial)}`,
+          `/monitoring/v1/gateways?serial=${s}`,
+          `/monitoring/v2/gateways?serial=${s}`,
+          `/monitoring/v1/gateways/${s}`,
         ];
       } else {
+        // Unknown type — try all device types
         paths = [
-          `/monitoring/v2/aps?serial=${encodeURIComponent(serial)}`,
-          `/monitoring/v2/switches?serial=${encodeURIComponent(serial)}`,
+          `/monitoring/v1/aps?serial=${s}`,
+          `/monitoring/v1/switches?serial=${s}`,
+          `/monitoring/v1/gateways?serial=${s}`,
+          `/monitoring/v2/aps?serial=${s}`,
+          `/monitoring/v2/switches?serial=${s}`,
         ];
       }
       for (const path of paths) {
-        const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
+        const url = `https://${centralUrl}${path}`;
+        const res = await proxyCall({ url, token: centralToken });
+        console.log(`[centralGetDeviceStats] ${path} → ${res.status}`);
         if (!res.ok) continue;
         const d = await res.json();
-        const device = d.aps?.[0] || d.switches?.[0] || d.gateways?.[0] || (d.serial ? d : null);
-        if (device) return device;
+        // Handle all known response shapes: array wrapper keys, data array, or bare object
+        const device = d.aps?.[0] || d.switches?.[0] || d.gateways?.[0]
+          || d.data?.[0]
+          || (d.serial ? d : null);
+        if (device) {
+          console.log('[centralGetDeviceStats] found via', path, '| status:', device.status);
+          return device;
+        }
       }
+      console.warn('[centralGetDeviceStats] no data found for serial', serial);
       return null;
     } catch (e) {
       console.warn('[centralGetDeviceStats] failed:', e.message);
@@ -2648,16 +2665,32 @@ const DeviceFoundScreen = ({ summary, onViewStatus, onProvision, onBack }) => {
 const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => {
   const [stats, setStats]       = useState(null);
   const [loading, setLoading]   = useState(true);
+  const [siteName, setSiteName] = useState(null);
 
   useEffect(() => {
     const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
-    api.centralGetDeviceStats({
+    const centralToken = settings.centralToken || settings.token;
+
+    // Fetch live stats and site list in parallel
+    const statsPromise = api.centralGetDeviceStats({
       serial: summary.serial,
       deviceType: summary.deviceType,
-      centralToken: settings.centralToken || settings.token,
+      centralToken,
       centralUrl,
-    }).then(d => { setStats(d); setLoading(false); })
-      .catch(() => setLoading(false));
+    }).catch(e => { console.warn('[DeviceStatusScreen] stats error:', e.message); return null; });
+
+    const sitesPromise = summary.currentSiteId
+      ? api.centralGetSites({ centralToken, centralUrl, token: settings.token }).catch(() => [])
+      : Promise.resolve([]);
+
+    Promise.all([statsPromise, sitesPromise]).then(([d, sites]) => {
+      setStats(d);
+      if (summary.currentSiteId && sites?.length) {
+        const match = sites.find(s => String(s.id) === String(summary.currentSiteId));
+        if (match) setSiteName(match.name);
+      }
+      setLoading(false);
+    });
   }, []);
 
   const typeEmoji = summary.deviceType === 'AP' ? '📡' : summary.deviceType === 'SWITCH' ? '🔀' : summary.deviceType === 'GATEWAY' ? '🌐' : '📦';
@@ -2775,7 +2808,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
           <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">Aruba Central</p>
           <div className="space-y-2.5 text-xs">
             {[
-              { label: 'Site',     value: summary.currentSiteId },
+              { label: 'Site',     value: siteName || (summary.currentSiteId ? '…' : null) },
               { label: 'Function', value: summary.currentFunctionId },
               { label: 'Hostname', value: stats?.name || null },
             ].map(r => r.value && (
