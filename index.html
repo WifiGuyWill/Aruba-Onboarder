@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260519d -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520a -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1053,6 +1053,49 @@ const liveApi = {
   //
   // The persona param (CAMPUS_AP, ACCESS_SWITCH, BRANCH_GW…) is REQUIRED — without it,
   // the API returns 200 but silently ignores the change (wrong config layer targeted).
+  // Central: fetch live device stats from the monitoring API.
+  // Returns status, uptime, firmware, client count, IP, and radio details.
+  // Tries device-type-specific endpoints; returns null if device not found or Central unavailable.
+  async centralGetDeviceStats({ serial, deviceType, centralToken, centralUrl }) {
+    if (!centralToken || !centralUrl || !serial) return null;
+    try {
+      const type = (deviceType || '').toUpperCase();
+      let paths = [];
+      if (type === 'AP' || type === 'IAP') {
+        paths = [
+          `/monitoring/v2/aps?serial=${encodeURIComponent(serial)}`,
+          `/monitoring/v1/aps/${encodeURIComponent(serial)}`,
+        ];
+      } else if (type === 'SWITCH') {
+        paths = [
+          `/monitoring/v2/switches?serial=${encodeURIComponent(serial)}`,
+          `/monitoring/v1/switches/${encodeURIComponent(serial)}`,
+        ];
+      } else if (type === 'GATEWAY') {
+        paths = [
+          `/monitoring/v2/gateways?serial=${encodeURIComponent(serial)}`,
+          `/monitoring/v1/gateways/${encodeURIComponent(serial)}`,
+        ];
+      } else {
+        paths = [
+          `/monitoring/v2/aps?serial=${encodeURIComponent(serial)}`,
+          `/monitoring/v2/switches?serial=${encodeURIComponent(serial)}`,
+        ];
+      }
+      for (const path of paths) {
+        const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
+        if (!res.ok) continue;
+        const d = await res.json();
+        const device = d.aps?.[0] || d.switches?.[0] || d.gateways?.[0] || (d.serial ? d : null);
+        if (device) return device;
+      }
+      return null;
+    } catch (e) {
+      console.warn('[centralGetDeviceStats] failed:', e.message);
+      return null;
+    }
+  },
+
   async centralSetHostname({ serial, hostname, hostnameExists, scopeId, persona, deviceType, centralToken, centralUrl }) {
     const errors = [];
 
@@ -1181,6 +1224,19 @@ const demoApi = {
     return { _scopeId: '73891316876853001' };
   },
   async centralSetHostname()   { await delay(500); return { success: true }; },
+  async centralGetDeviceStats({ serial } = {}) {
+    await delay(700);
+    if (!(serial || '').toUpperCase().startsWith('EXIST')) return null;
+    return {
+      status: 'Up', uptime: 1234567, firmware_version: '10.6.0.0-beta',
+      client_count: 23, ip_address: '10.1.2.45',
+      name: 'AP-LDN-HQ-001',
+      radios: [
+        { band: '2.4GHz', channel: 6,   tx_power: 18, utilization: 12, noise_floor: -95 },
+        { band: '5GHz',   channel: 100,  tx_power: 15, utilization: 42, noise_floor: -92 },
+      ],
+    };
+  },
 };
 
 // ── BARCODE PARSER ─────────────────────────────────────────────────────────────
@@ -2512,6 +2568,239 @@ const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
   );
 };
 
+// ── SCREEN: DEVICE FOUND (existing device choice) ────────────────────────────
+const DeviceFoundScreen = ({ summary, onViewStatus, onProvision, onBack }) => {
+  const typeEmoji = summary.deviceType === 'AP' ? '📡' : summary.deviceType === 'SWITCH' ? '🔀' : summary.deviceType === 'GATEWAY' ? '🌐' : '📦';
+  const rows = [
+    summary.currentSubscriptionKey && { label: 'Subscription', value: summary.currentSubscriptionKey },
+    summary.currentFunctionId      && { label: 'Function',     value: summary.currentFunctionId },
+    summary.currentSiteId          && { label: 'Site ID',       value: summary.currentSiteId },
+    summary.currentApplicationId   && { label: 'Application',   value: 'Assigned' },
+  ].filter(Boolean);
+
+  return (
+    <div className="p-5 step-enter flex flex-col" style={{ minHeight: 'calc(100dvh - 120px)' }}>
+      <div className="pt-2 mb-5">
+        <h2 className="text-white font-bold text-xl">Device Found</h2>
+        <p className="text-gray-400 text-sm font-mono mt-0.5">{summary.serial}</p>
+      </div>
+
+      {/* Device summary card */}
+      <div className="rounded-2xl p-4 mb-4" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}>
+        <div className="flex items-center gap-3 mb-3">
+          <span className="text-2xl">{typeEmoji}</span>
+          <div className="flex-1 min-w-0">
+            <p className="text-white font-bold truncate">{summary.deviceModel || summary.deviceType || 'Device'}</p>
+            {summary.devicePartNumber && <p className="text-gray-500 text-xs">{summary.devicePartNumber}</p>}
+          </div>
+          <span className="text-xs px-2.5 py-1 rounded-full font-semibold whitespace-nowrap bg-blue-500 bg-opacity-20 text-blue-400">Already in GL</span>
+        </div>
+        {rows.length > 0 && (
+          <div className="grid grid-cols-2 gap-2">
+            {rows.map(r => (
+              <div key={r.label} className="rounded-lg px-3 py-2" style={{ background: 'rgba(255,255,255,0.04)' }}>
+                <p className="text-gray-500 text-xs mb-0.5">{r.label}</p>
+                <p className="text-gray-300 text-xs font-medium truncate">{r.value}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <p className="text-gray-500 text-xs text-center mb-4">This device is already registered in GreenLake. What would you like to do?</p>
+
+      <div className="space-y-3">
+        <button onClick={onViewStatus}
+          className="w-full rounded-2xl p-4 text-left active:scale-95 transition-transform"
+          style={{ background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)' }}>
+          <div className="flex items-center gap-3">
+            <span className="text-xl">📋</span>
+            <div className="flex-1">
+              <p className="text-indigo-300 font-semibold text-sm">View Device Status</p>
+              <p className="text-indigo-400 text-xs mt-0.5" style={{ opacity: 0.75 }}>Live stats, connectivity &amp; assignments</p>
+            </div>
+            <span className="text-indigo-400 text-xl">›</span>
+          </div>
+        </button>
+
+        <button onClick={onProvision}
+          className="w-full rounded-2xl p-4 text-left active:scale-95 transition-transform"
+          style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.25)' }}>
+          <div className="flex items-center gap-3">
+            <span className="text-xl">⚙️</span>
+            <div className="flex-1">
+              <p className="text-emerald-300 font-semibold text-sm">Update / Provision</p>
+              <p className="text-emerald-400 text-xs mt-0.5" style={{ opacity: 0.75 }}>Change subscription, site, or other settings</p>
+            </div>
+            <span className="text-emerald-400 text-xl">›</span>
+          </div>
+        </button>
+      </div>
+
+      <button onClick={onBack} className="mt-auto pt-8 text-gray-600 text-xs text-center w-full">
+        ← Scan another device
+      </button>
+    </div>
+  );
+};
+
+// ── SCREEN: DEVICE STATUS ─────────────────────────────────────────────────────
+const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => {
+  const [stats, setStats]       = useState(null);
+  const [loading, setLoading]   = useState(true);
+
+  useEffect(() => {
+    const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
+    api.centralGetDeviceStats({
+      serial: summary.serial,
+      deviceType: summary.deviceType,
+      centralToken: settings.centralToken || settings.token,
+      centralUrl,
+    }).then(d => { setStats(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  const typeEmoji = summary.deviceType === 'AP' ? '📡' : summary.deviceType === 'SWITCH' ? '🔀' : summary.deviceType === 'GATEWAY' ? '🌐' : '📦';
+
+  const fmtUptime = secs => {
+    if (!secs) return '—';
+    const d = Math.floor(secs / 86400);
+    const h = Math.floor((secs % 86400) / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    return [d && `${d}d`, h && `${h}h`, m && `${m}m`].filter(Boolean).join(' ') || '<1m';
+  };
+
+  return (
+    <div className="flex flex-col" style={{ height: 'calc(100dvh - 120px)' }}>
+      {/* Header */}
+      <div className="px-5 pt-4 pb-3 flex items-center gap-3 shrink-0" style={{ borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+        <button onClick={onBack} className="text-gray-400 text-sm py-1 pr-2">‹ Back</button>
+        <div className="flex-1 min-w-0">
+          <p className="text-white font-bold">{typeEmoji} {summary.deviceModel || 'Device Status'}</p>
+          <p className="text-gray-500 text-xs font-mono truncate">{summary.serial}</p>
+        </div>
+        {stats && (
+          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${(stats.status || '').toLowerCase() === 'up' ? 'bg-emerald-400' : 'bg-red-400'}`}
+            style={{ boxShadow: (stats.status || '').toLowerCase() === 'up' ? '0 0 6px #10b981' : '0 0 6px #ef4444' }} />
+        )}
+      </div>
+
+      {/* Scrollable content */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4 min-h-0">
+
+        {/* Live status */}
+        {loading
+          ? <div className="flex flex-col items-center py-8 gap-3"><Spinner size={32} /><p className="text-gray-500 text-sm">Fetching live data…</p></div>
+          : stats ? (
+            <div className="rounded-2xl p-4" style={{ background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.2)' }}>
+              <p className="text-emerald-400 text-xs font-bold uppercase tracking-widest mb-3">Live Status</p>
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <p className="text-gray-500 mb-0.5">Status</p>
+                  <p className={`font-semibold ${(stats.status || '').toLowerCase() === 'up' ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(stats.status || '').toLowerCase() === 'up' ? '🟢' : '🔴'} {stats.status || '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-gray-500 mb-0.5">Uptime</p>
+                  <p className="text-white font-medium">{fmtUptime(stats.uptime)}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500 mb-0.5">Clients</p>
+                  <p className="text-white font-medium">{stats.client_count ?? '—'}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500 mb-0.5">Firmware</p>
+                  <p className="text-white font-medium">{stats.firmware_version || '—'}</p>
+                </div>
+                {stats.ip_address && (
+                  <div className="col-span-2">
+                    <p className="text-gray-500 mb-0.5">IP Address</p>
+                    <p className="text-white font-mono font-medium">{stats.ip_address}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-2xl p-4 text-center" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <p className="text-gray-500 text-sm">Live stats unavailable</p>
+              <p className="text-gray-600 text-xs mt-1">Device may not be in Aruba Central yet</p>
+            </div>
+          )
+        }
+
+        {/* RF stats (APs only) */}
+        {stats?.radios?.length > 0 && (
+          <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+            <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">RF Health</p>
+            <div className="space-y-3">
+              {stats.radios.map((r, i) => (
+                <div key={i} className="grid grid-cols-2 gap-2 text-xs pb-3 last:pb-0 last:border-0" style={{ borderBottom: i < stats.radios.length - 1 ? '1px solid rgba(255,255,255,0.06)' : 'none' }}>
+                  <div className="col-span-2">
+                    <p className="text-gray-300 font-semibold">{r.band || `Radio ${i + 1}`}</p>
+                  </div>
+                  <div><p className="text-gray-500 mb-0.5">Channel</p><p className="text-white font-medium">{r.channel ?? '—'}</p></div>
+                  <div><p className="text-gray-500 mb-0.5">Tx Power</p><p className="text-white font-medium">{r.tx_power != null ? `${r.tx_power} dBm` : '—'}</p></div>
+                  <div><p className="text-gray-500 mb-0.5">Utilization</p>
+                    <p className={`font-medium ${r.utilization > 70 ? 'text-red-400' : r.utilization > 40 ? 'text-yellow-400' : 'text-emerald-400'}`}>
+                      {r.utilization != null ? `${r.utilization}%` : '—'}
+                    </p>
+                  </div>
+                  <div><p className="text-gray-500 mb-0.5">Noise Floor</p><p className="text-white font-medium">{r.noise_floor != null ? `${r.noise_floor} dBm` : '—'}</p></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* GreenLake assignments */}
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">GreenLake Assignments</p>
+          <div className="space-y-2.5 text-xs">
+            {[
+              { label: 'Subscription', value: summary.currentSubscriptionKey },
+              { label: 'Application',  value: summary.currentApplicationId ? 'Assigned' : null },
+              { label: 'Location',     value: summary.currentLocationId },
+            ].map(r => r.value && (
+              <div key={r.label} className="flex justify-between items-center">
+                <span className="text-gray-500">{r.label}</span>
+                <span className="text-gray-300 font-medium font-mono text-right max-w-[55%] truncate">{r.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Central assignments */}
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">Aruba Central</p>
+          <div className="space-y-2.5 text-xs">
+            {[
+              { label: 'Site',     value: summary.currentSiteId },
+              { label: 'Function', value: summary.currentFunctionId },
+              { label: 'Hostname', value: stats?.name || null },
+            ].map(r => r.value && (
+              <div key={r.label} className="flex justify-between items-center">
+                <span className="text-gray-500">{r.label}</span>
+                <span className="text-gray-300 font-medium font-mono text-right max-w-[55%] truncate">{r.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+      </div>
+
+      {/* Update button */}
+      <div className="px-5 py-3 shrink-0" style={{ borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+        <button onClick={onProvision}
+          className="w-full py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95"
+          style={{ background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)', color: '#6ee7b7' }}>
+          ⚙️ Update this device →
+        </button>
+      </div>
+    </div>
+  );
+};
+
 // ── SCREEN: REVIEW ────────────────────────────────────────────────────────────
 // ── SCREEN: HOSTNAME (optional) ───────────────────────────────────────────────
 const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) => {
@@ -3611,7 +3900,7 @@ const BatchSuccessScreen = ({ queue, onAnother }) => {
 // ── APP ────────────────────────────────────────────────────────────────────────
 const STEPS = ['scan','tags','location','contact','adding_gl','device_type','subscription','application','site','function','review'];
 // device_type is a fallback screen — give it the same progress value as subscription so the bar doesn't jump.
-const STEP_PROGRESS = { scan:0, tags:1, location:2, contact:3, adding_gl:4, device_type:5, subscription:5, application:6, site:7, function:8, hostname:9, review:10 };
+const STEP_PROGRESS = { scan:0, tags:1, location:2, contact:3, adding_gl:4, device_found:0, device_status:0, device_type:5, subscription:5, application:6, site:7, function:8, hostname:9, review:10 };
 const TOTAL_STEPS = 10;
 
 const defaultSettings = () => ({
@@ -3714,17 +4003,18 @@ const App = () => {
 
   const isBatch = screen.startsWith('batch_');
   // Don't show progress bar on batch-mode scan home screen — it's the entry point, not step 1
-  const showProgress = !isBatch && !(settings.batchMode && screen === 'scan') && !['settings','success','boot'].includes(screen);
+  const showProgress = !isBatch && !(settings.batchMode && screen === 'scan') && !['settings','success','boot','device_found','device_status'].includes(screen);
   const currentStep = STEP_PROGRESS[screen] ?? 0;
   const backTarget = isBatch ? null : ({
-    tags:        'scan',
-    location:    'tags',
-    contact:     'location',
-    application: 'subscription',
-    site:        'application',
-    function:    'site',
-    review:      summary.deviceType === 'UXI' ? 'application' : 'function',
-    settings:    'scan',
+    tags:          'scan',
+    location:      'tags',
+    contact:       'location',
+    device_status: 'device_found',
+    application:   'subscription',
+    site:          'application',
+    function:      'site',
+    review:        summary.deviceType === 'UXI' ? 'application' : 'function',
+    settings:      'scan',
   }[screen] ?? null);
 
   // Batch back navigation — some are dynamic (group cycling), handled in components
@@ -3944,14 +4234,31 @@ const App = () => {
                 // Only overwrite current* values if the device response actually contains them —
                 // the background lookup (glLookupDevice) may have already set these and we
                 // don't want to clobber them with null if the v1 response omits the fields.
-                // subscription may be array or object; prefer _subKey normalised by glLookupDevice.
                 ...(device._subKey           ? { currentSubscriptionKey: device._subKey           } : {}),
                 ...(device.application?.id   ? { currentApplicationId:   device.application.id    } : {}),
               });
               console.log('[onSuccess] _subKey:', device._subKey, '| application?.id:', device.application?.id);
-              enterScreen(mapped ? 'subscription' : 'device_type');
+              // Existing devices get the choice screen first; new devices go straight to provisioning
+              if (device.foundExisting) {
+                enterScreen('device_found');
+              } else {
+                enterScreen(mapped ? 'subscription' : 'device_type');
+              }
             }}
             onBack={() => setScreen('location')} />
+        )}
+
+        {screen === 'device_found' && (
+          <DeviceFoundScreen summary={summary}
+            onViewStatus={() => setScreen('device_status')}
+            onProvision={() => enterScreen(summary.deviceType ? 'subscription' : 'device_type')}
+            onBack={() => { setSummary({}); setScreen('scan'); }} />
+        )}
+
+        {screen === 'device_status' && (
+          <DeviceStatusScreen summary={summary} settings={liveSettings} api={api}
+            onProvision={() => enterScreen(summary.deviceType ? 'subscription' : 'device_type')}
+            onBack={() => setScreen('device_found')} />
         )}
 
         {screen === 'device_type' && (
