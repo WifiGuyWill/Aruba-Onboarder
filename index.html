@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520b -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520c -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -4007,6 +4007,7 @@ const App = () => {
   const currentStep = STEP_PROGRESS[screen] ?? 0;
   const backTarget = isBatch ? null : ({
     lookup:        'scan',
+    device_found:  'scan',
     tags:          summary.foundExisting ? 'device_found' : 'scan',
     location:      'tags',
     contact:       'location',
