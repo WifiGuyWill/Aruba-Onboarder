@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520a -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520b -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -3900,7 +3900,7 @@ const BatchSuccessScreen = ({ queue, onAnother }) => {
 // ── APP ────────────────────────────────────────────────────────────────────────
 const STEPS = ['scan','tags','location','contact','adding_gl','device_type','subscription','application','site','function','review'];
 // device_type is a fallback screen — give it the same progress value as subscription so the bar doesn't jump.
-const STEP_PROGRESS = { scan:0, tags:1, location:2, contact:3, adding_gl:4, device_found:0, device_status:0, device_type:5, subscription:5, application:6, site:7, function:8, hostname:9, review:10 };
+const STEP_PROGRESS = { scan:0, lookup:0, tags:1, location:2, contact:3, adding_gl:4, device_found:0, device_status:0, device_type:5, subscription:5, application:6, site:7, function:8, hostname:9, review:10 };
 const TOTAL_STEPS = 10;
 
 const defaultSettings = () => ({
@@ -4003,10 +4003,11 @@ const App = () => {
 
   const isBatch = screen.startsWith('batch_');
   // Don't show progress bar on batch-mode scan home screen — it's the entry point, not step 1
-  const showProgress = !isBatch && !(settings.batchMode && screen === 'scan') && !['settings','success','boot','device_found','device_status'].includes(screen);
+  const showProgress = !isBatch && !(settings.batchMode && screen === 'scan') && !['settings','success','boot','lookup','device_found','device_status'].includes(screen);
   const currentStep = STEP_PROGRESS[screen] ?? 0;
   const backTarget = isBatch ? null : ({
-    tags:          'scan',
+    lookup:        'scan',
+    tags:          summary.foundExisting ? 'device_found' : 'scan',
     location:      'tags',
     contact:       'location',
     device_status: 'device_found',
@@ -4145,46 +4146,50 @@ const App = () => {
             )}
             <ScanScreen settings={liveSettings}
               onScanned={(d, raw) => {
-                upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null, currentSiteId: null, currentFunctionId: null });
-                // Background lookups — fetch a fresh token first so lookups don't fail
-                // if liveSettings.token is stale at the moment the scan fires.
+                upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null, currentSiteId: null, currentFunctionId: null, foundExisting: false, skipDeviceFound: false });
+                // Fire Central background lookup while LookupScreen handles the GL check
                 getGlToken()
                   .then(token => {
                     const centralUrl = CLUSTERS.find(c => c.id === liveSettings.centralCluster)?.url || CLUSTERS[0].url;
-                    // Fire GL and Central lookups in parallel
-                    return Promise.all([
-                      api.glLookupDevice({ serial: d.serial, ...liveSettings, token }),
-                      api.centralGetDeviceSiteId({ serial: d.serial, centralToken: token, centralUrl }),
-                    ]);
+                    return api.centralGetDeviceSiteId({ serial: d.serial, centralToken: token, centralUrl });
                   })
-                  .then(([existing, centralInfo]) => {
-                    const { siteId, persona } = centralInfo || {};
-                    console.log('[background lookup] existing:', !!existing, '| siteId:', siteId, '| persona:', persona);
-                    if (existing) {
-                      const patch = {
-                        currentTags:            existing.tags || {},
-                        // contact.workspaceUser.id for WORKSPACE-USER type; contact.id as fallback
-                        currentContactId:       existing.contact?.workspaceUser?.id || existing.contact?.id || null,
-                        currentLocationId:      existing.location?.id || null,
-                        // subscription is an array in the API response — use the normalised _subKey
-                        currentSubscriptionKey: existing._subKey || null,
-                        currentApplicationId:   existing.application?.id  || null,
-                      };
-                      console.log('[background lookup] upd patch:', JSON.stringify(patch));
-                      upd(patch);
-                    }
-                    // Persona 'None' means no function is configured — treat as null
+                  .then(({ siteId, persona } = {}) => {
                     const fnId = (persona && persona !== 'None') ? persona : null;
                     if (siteId || fnId) upd({
                       ...(siteId ? { currentSiteId:     siteId } : {}),
                       ...(fnId   ? { currentFunctionId: fnId   } : {}),
                     });
                   })
-                  .catch(e => console.warn('[background lookup] failed:', e.message));
-                enterScreen('tags');
+                  .catch(e => console.warn('[central background lookup] failed:', e.message));
+                enterScreen('lookup');
               }}
               onOpenSettings={() => setScreen('settings')} />
           </>
+        )}
+
+        {screen === 'lookup' && (
+          <LookupScreen serial={summary.serial} settings={liveSettings} api={api}
+            onDone={existing => {
+              if (existing) {
+                const glType = (existing.deviceType || '').toUpperCase();
+                const mapped = GL_DEVICE_TYPE_MAP[glType] || null;
+                upd({
+                  deviceId:              existing.id,
+                  deviceType:            mapped || summary.deviceType,
+                  deviceModel:           existing.model || existing.deviceModel || null,
+                  devicePartNumber:      existing.partNumber || null,
+                  foundExisting:         true,
+                  currentTags:           existing.tags || {},
+                  currentContactId:      existing.contact?.workspaceUser?.id || existing.contact?.id || null,
+                  currentLocationId:     existing.location?.id || null,
+                  currentSubscriptionKey: existing._subKey || null,
+                  currentApplicationId:  existing.application?.id || null,
+                });
+                setScreen('device_found');
+              } else {
+                enterScreen('tags');
+              }
+            }} />
         )}
 
         {screen === 'tags' && (
@@ -4237,13 +4242,9 @@ const App = () => {
                 ...(device._subKey           ? { currentSubscriptionKey: device._subKey           } : {}),
                 ...(device.application?.id   ? { currentApplicationId:   device.application.id    } : {}),
               });
-              console.log('[onSuccess] _subKey:', device._subKey, '| application?.id:', device.application?.id);
-              // Existing devices get the choice screen first; new devices go straight to provisioning
-              if (device.foundExisting) {
-                enterScreen('device_found');
-              } else {
-                enterScreen(mapped ? 'subscription' : 'device_type');
-              }
+              console.log('[onSuccess] _subKey:', device._subKey, '| application?.id:', device.application?.id, '| skipDeviceFound:', summary.skipDeviceFound);
+              // skipDeviceFound means user already saw device_found and chose Update — go straight to provisioning
+              enterScreen(mapped ? 'subscription' : 'device_type');
             }}
             onBack={() => setScreen('location')} />
         )}
@@ -4251,13 +4252,13 @@ const App = () => {
         {screen === 'device_found' && (
           <DeviceFoundScreen summary={summary}
             onViewStatus={() => setScreen('device_status')}
-            onProvision={() => enterScreen(summary.deviceType ? 'subscription' : 'device_type')}
+            onProvision={() => { upd({ skipDeviceFound: true }); enterScreen('tags'); }}
             onBack={() => { setSummary({}); setScreen('scan'); }} />
         )}
 
         {screen === 'device_status' && (
           <DeviceStatusScreen summary={summary} settings={liveSettings} api={api}
-            onProvision={() => enterScreen(summary.deviceType ? 'subscription' : 'device_type')}
+            onProvision={() => { upd({ skipDeviceFound: true }); enterScreen('tags'); }}
             onBack={() => setScreen('device_found')} />
         )}
 
