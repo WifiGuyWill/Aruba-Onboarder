@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520d -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520e -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1105,6 +1105,36 @@ const liveApi = {
           return device;
         }
       }
+
+      // Fallback: NRM devices endpoint — works on internal/HPE cluster where /monitoring/ is unavailable.
+      // Returns basic device info (config layer), not live monitoring data.
+      try {
+        const nrmUrl = `https://${centralUrl}/network-config/v1alpha1/devices?serial=${s}`;
+        const nrmRes = await proxyCall({ url: nrmUrl, token: centralToken });
+        console.log(`[centralGetDeviceStats] NRM devices → ${nrmRes.status}`);
+        if (nrmRes.ok) {
+          const d = await nrmRes.json();
+          const items = d.items || d.devices || (Array.isArray(d) ? d : []);
+          const match = items.find(item =>
+            String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
+          );
+          if (match) {
+            console.log('[centralGetDeviceStats] NRM match full object:', JSON.stringify(match));
+            return {
+              _source:          'nrm',
+              serial:           match.scopeName || serial,
+              status:           match.status || match.connectionStatus || match.device_status || null,
+              firmware_version: match.firmware || match.firmwareVersion || match.firmware_version || null,
+              name:             match.name || match.hostname || match.deviceName || null,
+              ip_address:       match.ip || match.ipAddress || match.ip_address || null,
+              model:            match.model || match.deviceModel || null,
+            };
+          }
+        }
+      } catch (nrmErr) {
+        console.warn('[centralGetDeviceStats] NRM fallback failed:', nrmErr.message);
+      }
+
       console.warn('[centralGetDeviceStats] no data found for serial', serial);
       return null;
     } catch (e) {
@@ -2725,23 +2755,39 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
         {loading
           ? <div className="flex flex-col items-center py-8 gap-3"><Spinner size={32} /><p className="text-gray-500 text-sm">Fetching live data…</p></div>
           : stats ? (
-            <div className="rounded-2xl p-4" style={{ background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.2)' }}>
-              <p className="text-emerald-400 text-xs font-bold uppercase tracking-widest mb-3">Live Status</p>
+            <div className="rounded-2xl p-4" style={{
+              background: stats._source === 'nrm' ? 'rgba(99,102,241,0.07)' : 'rgba(16,185,129,0.07)',
+              border:     stats._source === 'nrm' ? '1px solid rgba(99,102,241,0.25)' : '1px solid rgba(16,185,129,0.2)',
+            }}>
+              <div className="flex items-center justify-between mb-3">
+                <p className={`text-xs font-bold uppercase tracking-widest ${stats._source === 'nrm' ? 'text-indigo-400' : 'text-emerald-400'}`}>
+                  {stats._source === 'nrm' ? 'Device Info' : 'Live Status'}
+                </p>
+                {stats._source === 'nrm' && (
+                  <span className="text-gray-600 text-xs">live monitoring unavailable on this cluster</span>
+                )}
+              </div>
               <div className="grid grid-cols-2 gap-3 text-xs">
-                <div>
-                  <p className="text-gray-500 mb-0.5">Status</p>
-                  <p className={`font-semibold ${(stats.status || '').toLowerCase() === 'up' ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {(stats.status || '').toLowerCase() === 'up' ? '🟢' : '🔴'} {stats.status || '—'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-gray-500 mb-0.5">Uptime</p>
-                  <p className="text-white font-medium">{fmtUptime(stats.uptime)}</p>
-                </div>
-                <div>
-                  <p className="text-gray-500 mb-0.5">Clients</p>
-                  <p className="text-white font-medium">{stats.client_count ?? '—'}</p>
-                </div>
+                {stats.status && (
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Status</p>
+                    <p className={`font-semibold ${(stats.status || '').toLowerCase() === 'up' ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {(stats.status || '').toLowerCase() === 'up' ? '🟢' : '🔴'} {stats.status}
+                    </p>
+                  </div>
+                )}
+                {stats._source !== 'nrm' && (
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Uptime</p>
+                    <p className="text-white font-medium">{fmtUptime(stats.uptime)}</p>
+                  </div>
+                )}
+                {stats._source !== 'nrm' && (
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Clients</p>
+                    <p className="text-white font-medium">{stats.client_count ?? '—'}</p>
+                  </div>
+                )}
                 <div>
                   <p className="text-gray-500 mb-0.5">Firmware</p>
                   <p className="text-white font-medium">{stats.firmware_version || '—'}</p>
@@ -2757,7 +2803,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
           ) : (
             <div className="rounded-2xl p-4 text-center" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
               <p className="text-gray-500 text-sm">Live stats unavailable</p>
-              <p className="text-gray-600 text-xs mt-1">Device may not be in Aruba Central yet</p>
+              <p className="text-gray-600 text-xs mt-1">Monitoring API not responding — check your Central cluster setting</p>
             </div>
           )
         }
