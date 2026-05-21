@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521a -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521b -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2619,13 +2619,59 @@ const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
 };
 
 // ── SCREEN: DEVICE FOUND (existing device choice) ────────────────────────────
-const DeviceFoundScreen = ({ summary, onViewStatus, onProvision, onBack }) => {
+const DeviceFoundScreen = ({ summary, settings, api, onViewStatus, onProvision, onBack }) => {
   const typeEmoji = summary.deviceType === 'AP' ? '📡' : summary.deviceType === 'SWITCH' ? '🔀' : summary.deviceType === 'GATEWAY' ? '🌐' : '📦';
+
+  const [subDisplay, setSubDisplay] = useState(null);
+  const [appName,    setAppName]    = useState(null);
+  const [siteName,   setSiteName]   = useState(null);
+
+  useEffect(() => {
+    if (!settings || !api) return;
+    const token       = settings.token;
+    const centralUrl  = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
+    const centralToken = settings.centralToken || settings.token;
+
+    // Subscription tier — fetch single subscription by ID (lightest call)
+    const subPromise = summary.currentSubscriptionId
+      ? proxyCall({ url: `${GL_BASE}/subscriptions/v1/subscriptions/${summary.currentSubscriptionId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => {
+            if (!d) return null;
+            const raw = d.tier || d.subscription_tier_description || d.skuDescription || d.product_description || d.name || null;
+            if (!raw) return null;
+            // Normalise ALL-CAPS to Title Case ("FOUNDATION" → "Foundation")
+            return raw === raw.toUpperCase() ? raw.split(/[_\s]+/).map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(' ') : raw;
+          })
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    // Application name — fetch service manager by ID
+    const appPromise = summary.currentApplicationId
+      ? proxyCall({ url: `${GL_BASE}/service-catalog/v1beta1/service-managers/${summary.currentApplicationId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => d?.name || null)
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    // Site name — resolve numeric ID against Central sites list
+    const sitePromise = summary.currentSiteId
+      ? api.centralGetSites({ centralToken, centralUrl, token }).catch(() => [])
+          .then(sites => sites.find(s => String(s.id) === String(summary.currentSiteId))?.name || null)
+      : Promise.resolve(null);
+
+    Promise.all([subPromise, appPromise, sitePromise]).then(([sub, app, site]) => {
+      if (sub)  setSubDisplay(sub);
+      if (app)  setAppName(app);
+      if (site) setSiteName(site);
+    });
+  }, []);
+
   const rows = [
-    summary.currentSubscriptionKey && { label: 'Subscription', value: summary.currentSubscriptionKey },
+    summary.currentSubscriptionKey && { label: 'Subscription', value: subDisplay || '…' },
     summary.currentFunctionId      && { label: 'Function',     value: summary.currentFunctionId },
-    summary.currentSiteId          && { label: 'Site ID',       value: summary.currentSiteId },
-    summary.currentApplicationId   && { label: 'Application',   value: 'Assigned' },
+    summary.currentSiteId          && { label: 'Site',         value: siteName   || '…' },
+    summary.currentApplicationId   && { label: 'Application',  value: appName    || '…' },
   ].filter(Boolean);
 
   return (
@@ -3464,6 +3510,7 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
         deviceModel: glData.model || glData.deviceModel || null,
         partNumber: glData.partNumber || null,
         currentSubscriptionKey: glData._subKey || null,
+        currentSubscriptionId:  glData._subId  || null,
         currentApplicationId: glData.application?.id || null,
         currentLocationId: glData.location?.id || null,
         currentContactId: glData.contact?.workspaceUser?.id || glData.contact?.id || null,
@@ -4461,6 +4508,7 @@ const App = () => {
                   currentContactId:      existing.contact?.workspaceUser?.id || existing.contact?.id || null,
                   currentLocationId:     existing.location?.id || null,
                   currentSubscriptionKey: existing._subKey || null,
+                  currentSubscriptionId:  existing._subId  || null,
                   currentApplicationId:  existing.application?.id || null,
                 });
                 setScreen('device_found');
@@ -4518,6 +4566,7 @@ const App = () => {
                 // the background lookup (glLookupDevice) may have already set these and we
                 // don't want to clobber them with null if the v1 response omits the fields.
                 ...(device._subKey           ? { currentSubscriptionKey: device._subKey           } : {}),
+                ...(device._subId            ? { currentSubscriptionId:  device._subId             } : {}),
                 ...(device.application?.id   ? { currentApplicationId:   device.application.id    } : {}),
               });
               console.log('[onSuccess] _subKey:', device._subKey, '| application?.id:', device.application?.id, '| skipDeviceFound:', summary.skipDeviceFound);
@@ -4528,7 +4577,7 @@ const App = () => {
         )}
 
         {screen === 'device_found' && (
-          <DeviceFoundScreen summary={summary}
+          <DeviceFoundScreen summary={summary} settings={liveSettings} api={api}
             onViewStatus={() => setScreen('device_status')}
             onProvision={() => { upd({ skipDeviceFound: true }); enterScreen('tags'); }}
             onBack={() => { setSummary({}); setScreen('scan'); }} />
