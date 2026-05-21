@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521e -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521f -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2811,13 +2811,15 @@ const DeviceFoundScreen = ({ summary, settings, api, onViewStatus, onProvision, 
 
 // ── SCREEN: DEVICE STATUS ─────────────────────────────────────────────────────
 const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => {
-  const [stats, setStats]       = useState(null);
-  const [loading, setLoading]   = useState(true);
-  const [siteName, setSiteName] = useState(null);
+  const [stats, setStats]           = useState(null);
+  const [loading, setLoading]       = useState(true);
+  const [siteName, setSiteName]     = useState(null);
+  const [subDisplay, setSubDisplay] = useState(null);
 
   useEffect(() => {
     const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
     const centralToken = settings.centralToken || settings.token;
+    const token = settings.token;
 
     const statsPromise = api.centralGetDeviceStats({
       serial: summary.serial,
@@ -2827,10 +2829,22 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
     }).catch(e => { console.warn('[DeviceStatusScreen] stats error:', e.message); return null; });
 
     const sitesPromise = summary.currentSiteId
-      ? api.centralGetSites({ centralToken, centralUrl, token: settings.token }).catch(() => [])
+      ? api.centralGetSites({ centralToken, centralUrl, token }).catch(() => [])
       : Promise.resolve([]);
 
-    Promise.all([statsPromise, sitesPromise]).then(([d, sites]) => {
+    const subPromise = summary.currentSubscriptionId
+      ? proxyCall({ url: `${GL_BASE}/subscriptions/v1/subscriptions/${summary.currentSubscriptionId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => {
+            if (!d) return null;
+            const raw = d.tier || d.subscription_tier_description || d.skuDescription || d.product_description || d.name || null;
+            if (!raw) return null;
+            return raw === raw.toUpperCase() ? raw.split(/[_\s]+/).map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(' ') : raw;
+          })
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    Promise.all([statsPromise, sitesPromise, subPromise]).then(([d, sites, sub]) => {
       setStats(d);
       let resolvedName = null;
       if (summary.currentSiteId && sites?.length) {
@@ -2839,6 +2853,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
       }
       if (!resolvedName && d?.siteName) resolvedName = d.siteName;
       if (resolvedName) setSiteName(resolvedName);
+      if (sub) setSubDisplay(sub);
       setLoading(false);
     });
   }, []);
@@ -3189,7 +3204,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
               <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">GreenLake Assignments</p>
               <div className="space-y-2.5 text-xs">
                 {[
-                  { label: 'Subscription', value: summary.currentSubscriptionKey },
+                  { label: 'Subscription', value: subDisplay || (summary.currentSubscriptionKey ? '…' : null) },
                   { label: 'Application',  value: summary.currentApplicationId ? 'Assigned' : null },
                   { label: 'Location',     value: summary.currentLocationId },
                 ].filter(r => r.value).map(r => (
