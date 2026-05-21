@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521d -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521e -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1092,6 +1092,32 @@ const liveApi = {
       })),
     });
 
+    // Normalize internal cluster network-monitoring/v1 switch response
+    const normalizeNetMonSwitch = d => {
+      const tr = d.switchTrends?.[0] || {};
+      return {
+        _source:           'internal-switch',
+        status:            d.status,             // "Online"
+        uptime:            d.uptimeInMillis != null ? Math.round(d.uptimeInMillis / 1000) : null,
+        firmware_version:  d.firmwareVersion    || null,
+        name:              d.deviceName         || null,
+        ip_address:        d.ipv4               || null,
+        public_ip_address: d.publicIp           || d.publicIpv4 || null,  // field is "publicIp" here
+        macaddr:           d.macAddress         || null,
+        model:             d.model              || null,
+        switch_type:       d.switchType         || null,   // "cx", "aos-s", etc.
+        health:            d.health             || null,   // "Good" / "Fair" / "Poor"
+        cpu_utilization:   tr.cpuUtilization    ?? null,
+        mem_pct:           tr.memoryUtilization ?? null,
+        poe_consumption:   tr.poeConsumption    != null ? Math.round(tr.poeConsumption * 10) / 10 : null,
+        total_poe:         tr.poeAvailable      ?? null,
+        temperature:       tr.systemTemperature != null ? Math.round(tr.systemTemperature * 10) / 10 : null,
+        uplink_ports:      tr.upLinkPorts       || [],
+        last_restart:      d.lastRestartReason  || null,
+        config_status:     d.configStatus       || null,
+      };
+    };
+
     try {
       const type = (deviceType || '').toUpperCase();
       let paths = [];
@@ -1141,8 +1167,9 @@ const liveApi = {
         if (device) {
           // Normalise internal cluster network-monitoring response to standard shape
           if (path.includes('/network-monitoring/')) {
-            if (type === 'AP' || type === 'IAP') device = normalizeNetMonAp(device);
-            // Switch/Gateway normalisers will be added once we have real response examples
+            if (type === 'AP' || type === 'IAP')  device = normalizeNetMonAp(device);
+            else if (type === 'SWITCH')            device = normalizeNetMonSwitch(device);
+            // Gateway normaliser will be added once we have a real response example
           }
           console.log('[centralGetDeviceStats] found via', path, '| status:', device.status);
           return device;
@@ -2966,15 +2993,21 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
       return { in: inSum, out: outSum, count: ports.length };
     })();
 
-    const healthVal = stats.health_score ?? stats.health ?? null;
-    const healthColor = healthVal == null ? 'text-white' : healthVal >= 80 ? 'text-emerald-400' : healthVal >= 50 ? 'text-yellow-400' : 'text-red-400';
+    const healthRaw   = stats.health_score ?? stats.health ?? null;
+    const healthColor = healthRaw == null ? 'text-white'
+      : typeof healthRaw === 'number'
+        ? (healthRaw >= 80 ? 'text-emerald-400' : healthRaw >= 50 ? 'text-yellow-400' : 'text-red-400')
+        : ({ good: 'text-emerald-400', fair: 'text-yellow-400', poor: 'text-red-400' }[String(healthRaw).toLowerCase()] || 'text-white');
+    const healthDisplay = healthRaw == null ? null
+      : typeof healthRaw === 'number' ? `${healthRaw}/100` : String(healthRaw);
 
     return (<>
       <StatusCard extra={[
         { label: 'Uptime',       value: fmtUptime(stats.uptime) },
+        { label: 'Device Name',  value: stats.name },
         { label: 'Model',        value: stats.model || summary.deviceModel },
-        { label: 'Switch Type',  value: stats.switch_type },
-        { label: 'Health',       value: healthVal != null ? `${healthVal}/100` : null, color: healthColor },
+        { label: 'Switch Type',  value: stats.switch_type ? stats.switch_type.toUpperCase() : null },
+        { label: 'Health',       value: healthDisplay, color: healthColor },
         { label: 'Firmware',     value: stats.firmware_version, wide: true },
       ]} />
 
