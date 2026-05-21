@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521k -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521l -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -114,16 +114,25 @@ function filterSubscriptions(subs, deviceType) {
   });
 }
 
-// Maps human-readable deviceFunction labels (from network-monitoring API) → persona IDs
+// Maps human-readable deviceFunction / persona labels (network-monitoring API) → persona IDs
 const DEVICE_FUNCTION_LABEL_TO_PERSONA = {
-  'mobility gateway':   'MOBILITY_GW',
-  'branch gateway':     'BRANCH_GW',
-  'vpn concentrator':   'VPNC',
-  'campus ap':          'CAMPUS_AP',
-  'microbranch ap':     'MICROBRANCH_AP',
-  'access switch':      'ACCESS_SWITCH',
-  'aggregation switch': 'AGG_SWITCH',
-  'core switch':        'CORE_SWITCH',
+  // APs
+  'campus access point':  'CAMPUS_AP',
+  'campus ap':            'CAMPUS_AP',
+  'microbranch ap':       'MICROBRANCH_AP',
+  // Gateways
+  'mobility gateway':     'MOBILITY_GW',
+  'branch gateway':       'BRANCH_GW',
+  'vpn concentrator':     'VPNC',
+  // Switches
+  'access switch':        'ACCESS_SWITCH',
+  'aggregation switch':   'AGG_SWITCH',
+  'core switch':          'CORE_SWITCH',
+  'aoss access':          'AOSS_ACCESS_SWITCH',
+  'aoss aggregation':     'AOSS_AGG_SWITCH',
+  'aoss core':            'AOSS_CORE_SWITCH',
+  // Other
+  'bridge':               'BRIDGE',
 };
 
 // Maps Central device_type → allowed persona IDs (matches Central UI logic)
@@ -824,46 +833,43 @@ const liveApi = {
   },
 
   // Lightweight Central lookup: returns the siteId and persona currently assigned to a device.
-  // Uses the config-devices list which already contains both fields per device.
+  // Uses the network-monitoring devices list which contains persona (human-readable label),
+  // deviceFunction, siteId for all device types reliably.
   // Called as a background task right after scan so SiteScreen + FunctionScreen can be pre-populated.
   // Returns { siteId: string|null, persona: string|null }
   async centralGetDeviceSiteId({ serial, centralToken, centralUrl }) {
     if (!centralToken || !centralUrl || !serial) return { siteId: null, persona: null };
-    try {
-      const res = await proxyCall({
-        url: `https://${centralUrl}/network-config/v1alpha1/devices?serial=${encodeURIComponent(serial)}`,
-        token: centralToken,
-      });
-      if (!res.ok) return { siteId: null, persona: null };
-      const d = await res.json();
-      const items = d.items || d.devices || (Array.isArray(d) ? d : []);
-      const match = items.find(item =>
-        String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
-      );
-      const siteId = match?.siteId || match?.site_id || null;
-      // persona may be a Central persona ID ("CAMPUS_AP"), a human-readable label
-      // ("Mobility Gateway"), or the literal string "None" (internal cluster default)
-      let persona = match?.persona || match?.['device-function'] || match?.deviceFunction || null;
-      // Treat Central's sentinel "None" the same as absent
-      if (persona === 'None' || persona === 'NONE' || persona === 'none') persona = null;
-      // Map human-readable label → persona ID ("Mobility Gateway" → "MOBILITY_GW")
-      if (persona && !persona.includes('_') && persona !== persona.toUpperCase()) {
-        persona = DEVICE_FUNCTION_LABEL_TO_PERSONA[persona.toLowerCase()] || persona;
+    const s = encodeURIComponent(serial);
+    // Try the network-monitoring devices list (v1alpha1) — returns persona + siteId reliably.
+    // The filter param may or may not be server-side; we always do client-side matching too.
+    for (const path of [
+      `/network-monitoring/v1alpha1/devices?serial=${s}`,
+      `/network-monitoring/v1alpha1/devices`,
+    ]) {
+      try {
+        const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
+        console.log(`[centralGetDeviceSiteId] ${path} → ${res.status}`);
+        if (!res.ok) continue;
+        const d = await res.json();
+        const items = d.items || d.devices || (Array.isArray(d) ? d : []);
+        const match = items.find(item =>
+          String(item.serialNumber || item.serial || item.scopeName || item.id || '').toUpperCase() === serial.toUpperCase()
+        );
+        if (!match) continue;
+
+        const siteId = match?.siteId || match?.site_id || null;
+        // persona comes as a human-readable label: "Campus Access Point", "Mobility Gateway", etc.
+        let persona = match?.persona || match?.deviceFunction || match?.['device-function'] || null;
+        if (persona === 'None' || persona === 'NONE' || persona === 'none') persona = null;
+        // Map label → persona ID
+        if (persona) persona = DEVICE_FUNCTION_LABEL_TO_PERSONA[persona.toLowerCase()] || persona;
+        console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
+        return { siteId: siteId ? String(siteId) : null, persona: persona || null };
+      } catch (e) {
+        console.warn(`[centralGetDeviceSiteId] ${path} failed:`, e.message);
       }
-      // If persona is still null, derive a safe default from the device type in the same
-      // NRM record — mirrors the logic in centralGetSystemInfo ("None" means implicit default)
-      if (!persona) {
-        const dt = (match?.deviceType || '').toUpperCase();
-        if (dt === 'AP' || dt === 'IAP')     persona = 'CAMPUS_AP';
-        else if (dt.includes('SWITCH'))       persona = 'ACCESS_SWITCH';
-        // GATEWAY: can't distinguish BRANCH_GW vs MOBILITY_GW without monitoring data — leave null
-      }
-      console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
-      return { siteId: siteId ? String(siteId) : null, persona: persona || null };
-    } catch (e) {
-      console.warn('[centralGetDeviceSiteId] failed:', e.message);
-      return { siteId: null, persona: null };
     }
+    return { siteId: null, persona: null };
   },
 
   // Central: assign a device to a site.
