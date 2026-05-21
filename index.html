@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521c -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521d -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1069,10 +1069,12 @@ const liveApi = {
       name:              d.deviceName        || null,
       ip_address:        d.ipv4              || null,
       public_ip_address: d.publicIpv4        || null,
+      subnet_mask:       d.subnetMask        || null,
       gateway_ip:        (d.defaultGateway   || '').replace(/\s*\(.*\)\s*$/, '').trim() || null,
       macaddr:           d.macAddress        || null,
       model:             d.model             || null,
       negotiated_power:  d.negotiatedPower   || null,   // "802.3at" — a standard name, not watts
+      client_count:      d.apStats?.[0]?.clientCount     ?? null,
       cpu_utilization:   d.apStats?.[0]?.cpuUtilization  ?? null,
       mem_pct:           d.apStats?.[0]?.memoryUtilization ?? null,
       bandSelection:     d.bandSelection     || null,
@@ -1086,6 +1088,7 @@ const liveApi = {
         status:      r.status      || null,
         wlans:       r.wlans       || [],
         spatialStream: r.spatialStream || null,
+        radioType:   r.radioType   || null,
       })),
     });
 
@@ -1095,13 +1098,15 @@ const liveApi = {
       const s = encodeURIComponent(serial);
       if (type === 'AP' || type === 'IAP') {
         paths = [
-          `/network-monitoring/v1alpha1/aps/${s}`,  // internal/HPE cluster
-          `/monitoring/v1/aps?serial=${s}`,          // standard v1 query param
+          `/network-monitoring/v1/aps/${s}`,         // internal/HPE cluster v1 (confirmed)
+          `/network-monitoring/v1alpha1/aps/${s}`,   // internal/HPE cluster v1alpha1 (fallback)
+          `/monitoring/v1/aps?serial=${s}`,           // standard cluster v1 query param
           `/monitoring/v2/aps?serial=${s}`,
           `/monitoring/v1/aps/${s}`,
         ];
       } else if (type === 'SWITCH') {
         paths = [
+          `/network-monitoring/v1/switches/${s}`,
           `/network-monitoring/v1alpha1/switches/${s}`,
           `/monitoring/v1/switches?serial=${s}`,
           `/monitoring/v2/switches?serial=${s}`,
@@ -1109,6 +1114,7 @@ const liveApi = {
         ];
       } else if (type === 'GATEWAY') {
         paths = [
+          `/network-monitoring/v1/gateways/${s}`,
           `/network-monitoring/v1alpha1/gateways/${s}`,
           `/monitoring/v1/gateways?serial=${s}`,
           `/monitoring/v2/gateways?serial=${s}`,
@@ -1116,7 +1122,7 @@ const liveApi = {
         ];
       } else {
         paths = [
-          `/network-monitoring/v1alpha1/aps/${s}`,
+          `/network-monitoring/v1/aps/${s}`,
           `/monitoring/v1/aps?serial=${s}`,
           `/monitoring/v1/switches?serial=${s}`,
           `/monitoring/v1/gateways?serial=${s}`,
@@ -2901,8 +2907,9 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
           <div className="space-y-2.5 text-xs">
             {[
               { label: 'IP Address',   value: stats.ip_address },
-              { label: 'Public IP',    value: stats.public_ip_address },
+              { label: 'Subnet Mask',  value: stats.subnet_mask },
               { label: 'Gateway',      value: stats.gateway_ip },
+              { label: 'Public IP',    value: stats.public_ip_address },
               { label: 'MAC Address',  value: stats.macaddr || stats.mac },
             ].filter(r => r.value).map(r => (
               <div key={r.label} className="flex justify-between items-center">
