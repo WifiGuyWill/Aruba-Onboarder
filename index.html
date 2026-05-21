@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521i -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521j -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -113,6 +113,18 @@ function filterSubscriptions(subs, deviceType) {
     return Number(b.availableQuantity || 0) - Number(a.availableQuantity || 0);
   });
 }
+
+// Maps human-readable deviceFunction labels (from network-monitoring API) → persona IDs
+const DEVICE_FUNCTION_LABEL_TO_PERSONA = {
+  'mobility gateway':   'MOBILITY_GW',
+  'branch gateway':     'BRANCH_GW',
+  'vpn concentrator':   'VPNC',
+  'campus ap':          'CAMPUS_AP',
+  'microbranch ap':     'MICROBRANCH_AP',
+  'access switch':      'ACCESS_SWITCH',
+  'aggregation switch': 'AGG_SWITCH',
+  'core switch':        'CORE_SWITCH',
+};
 
 // Maps Central device_type → allowed persona IDs (matches Central UI logic)
 const PERSONA_BY_DEVICE_TYPE = {
@@ -828,8 +840,14 @@ const liveApi = {
       const match = items.find(item =>
         String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
       );
-      const siteId  = match?.siteId  || match?.site_id  || null;
-      const persona = match?.persona || null;
+      const siteId = match?.siteId || match?.site_id || null;
+      // persona may be a Central persona ID ("CAMPUS_AP") or a human-readable label
+      // ("Mobility Gateway") depending on the cluster — normalise both
+      let persona = match?.persona || match?.['device-function'] || match?.deviceFunction || null;
+      if (persona && !persona.includes('_') && persona !== persona.toUpperCase()) {
+        // Looks like a human-readable label — map to persona ID
+        persona = DEVICE_FUNCTION_LABEL_TO_PERSONA[persona.toLowerCase()] || persona;
+      }
       console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
       return { siteId: siteId ? String(siteId) : null, persona: persona || null };
     } catch (e) {
@@ -2767,9 +2785,13 @@ const DeviceFoundScreen = ({ summary, settings, api, onViewStatus, onProvision, 
     });
   }, []);
 
+  const fnLabel = summary.currentFunctionId
+    ? (DEVICE_FUNCTIONS.find(f => f.id === summary.currentFunctionId)?.label || summary.currentFunctionId)
+    : null;
+
   const rows = [
-    summary.currentSubscriptionKey && { label: 'Subscription', value: subDisplay    || '…' },
-    summary.currentFunctionId      && { label: 'Function',     value: summary.currentFunctionId },
+    summary.currentSubscriptionKey && { label: 'Subscription', value: subDisplay || '…' },
+    fnLabel                        && { label: 'Function',     value: fnLabel },
     summary.currentSiteId          && { label: 'Site',         value: siteName      || '…' },
     summary.currentApplicationId   && { label: 'Application',  value: appName       || '…' },
     summary.currentLocationId      && { label: 'Location',     value: locationName  || '…' },
@@ -3257,7 +3279,8 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
                   { label: 'Subscription', value: subDisplay || (summary.currentSubscriptionKey ? '…' : null) },
                   { label: 'Application',  value: summary.currentApplicationId ? 'Assigned' : null },
                   { label: 'Location',     value: locationName || (summary.currentLocationId ? '…' : null) },
-                ].filter(r => r.value).map(r => (
+                  summary.currentFunctionId && { label: 'Function', value: DEVICE_FUNCTIONS.find(f => f.id === summary.currentFunctionId)?.label || summary.currentFunctionId },
+                ].filter(r => r && r.value).map(r => (
                   <div key={r.label} className="flex justify-between items-center">
                     <span className="text-gray-500">{r.label}</span>
                     <span className="text-gray-300 font-medium font-mono text-right max-w-[55%] truncate">{r.value}</span>
