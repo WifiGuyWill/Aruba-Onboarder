@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521j -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521k -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -841,12 +841,22 @@ const liveApi = {
         String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
       );
       const siteId = match?.siteId || match?.site_id || null;
-      // persona may be a Central persona ID ("CAMPUS_AP") or a human-readable label
-      // ("Mobility Gateway") depending on the cluster — normalise both
+      // persona may be a Central persona ID ("CAMPUS_AP"), a human-readable label
+      // ("Mobility Gateway"), or the literal string "None" (internal cluster default)
       let persona = match?.persona || match?.['device-function'] || match?.deviceFunction || null;
+      // Treat Central's sentinel "None" the same as absent
+      if (persona === 'None' || persona === 'NONE' || persona === 'none') persona = null;
+      // Map human-readable label → persona ID ("Mobility Gateway" → "MOBILITY_GW")
       if (persona && !persona.includes('_') && persona !== persona.toUpperCase()) {
-        // Looks like a human-readable label — map to persona ID
         persona = DEVICE_FUNCTION_LABEL_TO_PERSONA[persona.toLowerCase()] || persona;
+      }
+      // If persona is still null, derive a safe default from the device type in the same
+      // NRM record — mirrors the logic in centralGetSystemInfo ("None" means implicit default)
+      if (!persona) {
+        const dt = (match?.deviceType || '').toUpperCase();
+        if (dt === 'AP' || dt === 'IAP')     persona = 'CAMPUS_AP';
+        else if (dt.includes('SWITCH'))       persona = 'ACCESS_SWITCH';
+        // GATEWAY: can't distinguish BRANCH_GW vs MOBILITY_GW without monitoring data — leave null
       }
       console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
       return { siteId: siteId ? String(siteId) : null, persona: persona || null };
