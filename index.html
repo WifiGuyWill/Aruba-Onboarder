@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521b -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521c -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1058,36 +1058,68 @@ const liveApi = {
   // Tries device-type-specific endpoints; returns null if device not found or Central unavailable.
   async centralGetDeviceStats({ serial, deviceType, centralToken, centralUrl }) {
     if (!centralToken || !centralUrl || !serial) return null;
+
+    // Normalize the internal cluster's network-monitoring/v1alpha1 AP response
+    // to the same shape our UI expects from the standard monitoring API.
+    const normalizeNetMonAp = d => ({
+      _source:           'internal-ap',
+      status:            d.status,            // "ONLINE" / "OFFLINE"
+      uptime:            d.uptimeInMillis != null ? Math.round(d.uptimeInMillis / 1000) : null,
+      firmware_version:  d.firmwareVersion   || d.softwareVersion || null,
+      name:              d.deviceName        || null,
+      ip_address:        d.ipv4              || null,
+      public_ip_address: d.publicIpv4        || null,
+      gateway_ip:        (d.defaultGateway   || '').replace(/\s*\(.*\)\s*$/, '').trim() || null,
+      macaddr:           d.macAddress        || null,
+      model:             d.model             || null,
+      negotiated_power:  d.negotiatedPower   || null,   // "802.3at" — a standard name, not watts
+      cpu_utilization:   d.apStats?.[0]?.cpuUtilization  ?? null,
+      mem_pct:           d.apStats?.[0]?.memoryUtilization ?? null,
+      bandSelection:     d.bandSelection     || null,
+      radios: (d.radios || []).map(r => ({
+        band:        r.band        || null,
+        channel:     r.channel     || null,
+        bandwidth:   r.bandwidth   || null,      // "20 MHz", "80 MHz", "160 MHz"
+        tx_power:    r.power       != null ? parseInt(r.power)  : null,
+        utilization: r.radioStats?.[0]?.channelUtilization != null ? parseInt(r.radioStats[0].channelUtilization) : null,
+        noise_floor: r.radioStats?.[0]?.noiseFloor         != null ? parseInt(r.radioStats[0].noiseFloor)         : null,
+        status:      r.status      || null,
+        wlans:       r.wlans       || [],
+        spatialStream: r.spatialStream || null,
+      })),
+    });
+
     try {
       const type = (deviceType || '').toUpperCase();
       let paths = [];
       const s = encodeURIComponent(serial);
       if (type === 'AP' || type === 'IAP') {
         paths = [
-          `/monitoring/v1/aps?serial=${s}`,        // v1 query param — most reliable
+          `/network-monitoring/v1alpha1/aps/${s}`,  // internal/HPE cluster
+          `/monitoring/v1/aps?serial=${s}`,          // standard v1 query param
           `/monitoring/v2/aps?serial=${s}`,
-          `/monitoring/v1/aps/${s}`,                // v1 path param
+          `/monitoring/v1/aps/${s}`,
         ];
       } else if (type === 'SWITCH') {
         paths = [
+          `/network-monitoring/v1alpha1/switches/${s}`,
           `/monitoring/v1/switches?serial=${s}`,
           `/monitoring/v2/switches?serial=${s}`,
           `/monitoring/v1/switches/${s}`,
         ];
       } else if (type === 'GATEWAY') {
         paths = [
+          `/network-monitoring/v1alpha1/gateways/${s}`,
           `/monitoring/v1/gateways?serial=${s}`,
           `/monitoring/v2/gateways?serial=${s}`,
           `/monitoring/v1/gateways/${s}`,
         ];
       } else {
-        // Unknown type — try all device types
         paths = [
+          `/network-monitoring/v1alpha1/aps/${s}`,
           `/monitoring/v1/aps?serial=${s}`,
           `/monitoring/v1/switches?serial=${s}`,
           `/monitoring/v1/gateways?serial=${s}`,
-          `/monitoring/v2/aps?serial=${s}`,
-          `/monitoring/v2/switches?serial=${s}`,
         ];
       }
       for (const path of paths) {
@@ -1096,18 +1128,22 @@ const liveApi = {
         console.log(`[centralGetDeviceStats] ${path} → ${res.status}`);
         if (!res.ok) continue;
         const d = await res.json();
-        // Handle all known response shapes: array wrapper keys, data array, or bare object
-        const device = d.aps?.[0] || d.switches?.[0] || d.gateways?.[0]
+        // Handle all known response shapes: array wrapper, data array, or bare object
+        let device = d.aps?.[0] || d.switches?.[0] || d.gateways?.[0]
           || d.data?.[0]
-          || (d.serial ? d : null);
+          || (d.serial || d.serialNumber || d.id ? d : null);
         if (device) {
+          // Normalise internal cluster network-monitoring response to standard shape
+          if (path.includes('/network-monitoring/')) {
+            if (type === 'AP' || type === 'IAP') device = normalizeNetMonAp(device);
+            // Switch/Gateway normalisers will be added once we have real response examples
+          }
           console.log('[centralGetDeviceStats] found via', path, '| status:', device.status);
           return device;
         }
       }
 
-      // Fallback: NRM devices endpoint — works on internal/HPE cluster where /monitoring/ is unavailable.
-      // Returns basic device info (config layer), not live monitoring data.
+      // Last resort: NRM config endpoint (no live data, but model/IP/MAC)
       try {
         const nrmUrl = `https://${centralUrl}/network-config/v1alpha1/devices?serial=${s}`;
         const nrmRes = await proxyCall({ url: nrmUrl, token: centralToken });
@@ -1123,10 +1159,10 @@ const liveApi = {
             return {
               _source:          'nrm',
               serial:           match.scopeName || serial,
-              status:           match.status || match.connectionStatus || match.device_status || null,
-              firmware_version: match.firmware || match.firmwareVersion || match.firmware_version || null,
-              name:             match.hostname || match.deviceName || null, // skip MAC-based 'name' field
-              ip_address:       match.ipv4 || match.ip || match.ipAddress || match.ip_address || null,
+              status:           match.status || match.connectionStatus || null,
+              firmware_version: match.firmware || match.firmwareVersion || null,
+              name:             match.hostname || match.deviceName || null,
+              ip_address:       match.ipv4 || match.ip || match.ipAddress || null,
               model:            match.model || match.deviceModel || null,
               siteName:         match.siteName || null,
               deployment:       match.deployment || null,
@@ -2775,7 +2811,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
   }, []);
 
   // ── Shared helpers ────────────────────────────────────────────────────────────
-  const isUp       = (stats?.status || '').toLowerCase() === 'up';
+  const isUp       = ['up', 'online'].includes((stats?.status || '').toLowerCase());
   const typeEmoji  = summary.deviceType === 'AP' ? '📡' : summary.deviceType === 'SWITCH' ? '🔀' : summary.deviceType === 'GATEWAY' ? '🌐' : '📦';
   const isNrm      = stats?._source === 'nrm';
 
@@ -2791,12 +2827,13 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
     const d  = new Date(ms);
     return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   };
-  const fmtMem = (total, free) => {
+  const fmtMem = (total, free, pct) => {
+    if (pct  != null) return `${pct}% used`;
     if (!total) return null;
-    const used = total - (free || 0);
-    const pct  = Math.round((used / total) * 100);
-    const mb   = v => `${Math.round(v / 1024)} MB`;
-    return `${mb(used)} / ${mb(total)} (${pct}%)`;
+    const used    = total - (free || 0);
+    const usedPct = Math.round((used / total) * 100);
+    const mb      = v => `${Math.round(v / 1024)} MB`;
+    return `${mb(used)} / ${mb(total)} (${usedPct}%)`;
   };
   const fmtRate = bps => {
     if (bps == null) return '—';
@@ -2837,45 +2874,80 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
   };
 
   // ── AP-specific sections ──────────────────────────────────────────────────────
-  const ApSections = () => (<>
-    <StatusCard extra={[
-      { label: 'Uptime',           value: fmtUptime(stats.uptime) },
-      { label: 'Firmware',         value: stats.firmware_version,               wide: true },
-      { label: 'Negotiated Power', value: stats.poe_consumption != null ? `${stats.poe_consumption} W` : (stats.negotiated_power != null ? `${stats.negotiated_power} W` : null) },
-      { label: 'Clients',          value: stats.client_count != null ? String(stats.client_count) : null },
-    ]} />
+  const ApSections = () => {
+    // Negotiated power: "802.3at" is a standard name — show as-is; watts values append W
+    const poeFmt = (() => {
+      const np = stats.negotiated_power;
+      const pc = stats.poe_consumption;
+      if (np)             return np;             // "802.3at", "802.3bt", etc.
+      if (pc != null)     return `${pc} W`;
+      return null;
+    })();
 
-    {/* RF per-radio */}
-    {stats.radios?.length > 0 && (
-      <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-        <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">📡 Radio</p>
-        <div className="space-y-4">
-          {stats.radios.map((r, i) => {
-            const band = r.band || r.radio_name || `Radio ${i + 1}`;
-            return (
-              <div key={i}>
-                <p className="text-gray-300 text-xs font-semibold mb-2 pb-1.5" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-                  {band}
-                  {r.client_count != null && <span className="text-gray-500 font-normal ml-2">· {r.client_count} client{r.client_count !== 1 ? 's' : ''}</span>}
-                </p>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div><p className="text-gray-500 mb-0.5">Channel</p><p className="text-white font-medium">{r.channel ?? '—'}{r.bandwidth ? ` / ${r.bandwidth} MHz` : ''}</p></div>
-                  <div><p className="text-gray-500 mb-0.5">Tx Power</p><p className="text-white font-medium">{r.tx_power != null ? `${r.tx_power} dBm` : '—'}</p></div>
-                  <div>
-                    <p className="text-gray-500 mb-0.5">Utilization</p>
-                    <p className={`font-medium ${r.utilization > 70 ? 'text-red-400' : r.utilization > 40 ? 'text-yellow-400' : 'text-emerald-400'}`}>
-                      {r.utilization != null ? `${r.utilization}%` : '—'}
-                    </p>
-                  </div>
-                  <div><p className="text-gray-500 mb-0.5">Noise Floor</p><p className="text-white font-medium">{r.noise_floor != null ? `${r.noise_floor} dBm` : '—'}</p></div>
-                </div>
+    return (<>
+      <StatusCard extra={[
+        { label: 'Uptime',           value: fmtUptime(stats.uptime) },
+        { label: 'Firmware',         value: stats.firmware_version, wide: true },
+        { label: 'Negotiated Power', value: poeFmt },
+        { label: 'Clients',          value: stats.client_count != null ? String(stats.client_count) : null },
+        { label: 'CPU',              value: stats.cpu_utilization != null ? `${stats.cpu_utilization}%` : null },
+        { label: 'Memory',           value: fmtMem(stats.mem_total, stats.mem_free, stats.mem_pct) },
+      ]} />
+
+      {/* Network */}
+      {(stats.ip_address || stats.public_ip_address || stats.gateway_ip || stats.macaddr) && (
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🌐 Network</p>
+          <div className="space-y-2.5 text-xs">
+            {[
+              { label: 'IP Address',   value: stats.ip_address },
+              { label: 'Public IP',    value: stats.public_ip_address },
+              { label: 'Gateway',      value: stats.gateway_ip },
+              { label: 'MAC Address',  value: stats.macaddr || stats.mac },
+            ].filter(r => r.value).map(r => (
+              <div key={r.label} className="flex justify-between items-center">
+                <span className="text-gray-500">{r.label}</span>
+                <span className="text-gray-300 font-mono font-medium text-right max-w-[60%] truncate">{r.value}</span>
               </div>
-            );
-          })}
+            ))}
+          </div>
         </div>
-      </div>
-    )}
-  </>);
+      )}
+
+      {/* RF per-radio */}
+      {stats.radios?.length > 0 && (
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">📡 Radio</p>
+          <div className="space-y-4">
+            {stats.radios.map((r, i) => {
+              const band = r.band || r.radio_name || `Radio ${i + 1}`;
+              const chanLabel = [r.channel, r.bandwidth].filter(Boolean).join(' / ');
+              return (
+                <div key={i}>
+                  <p className="text-gray-300 text-xs font-semibold mb-2 pb-1.5" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                    {band}
+                    {r.client_count != null && <span className="text-gray-500 font-normal ml-2">· {r.client_count} client{r.client_count !== 1 ? 's' : ''}</span>}
+                    {r.status && r.status.toLowerCase() !== 'up' && <span className="text-red-400 font-normal ml-2">({r.status})</span>}
+                  </p>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div><p className="text-gray-500 mb-0.5">Channel / BW</p><p className="text-white font-medium">{chanLabel || '—'}</p></div>
+                    <div><p className="text-gray-500 mb-0.5">Tx Power</p><p className="text-white font-medium">{r.tx_power != null ? `${r.tx_power} dBm` : '—'}</p></div>
+                    <div>
+                      <p className="text-gray-500 mb-0.5">Utilization</p>
+                      <p className={`font-medium ${r.utilization > 70 ? 'text-red-400' : r.utilization > 40 ? 'text-yellow-400' : 'text-emerald-400'}`}>
+                        {r.utilization != null ? `${r.utilization}%` : '—'}
+                      </p>
+                    </div>
+                    <div><p className="text-gray-500 mb-0.5">Noise Floor</p><p className="text-white font-medium">{r.noise_floor != null ? `${r.noise_floor} dBm` : '—'}</p></div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </>);
+  };
 
   // ── Switch-specific sections ──────────────────────────────────────────────────
   const SwitchSections = () => {
@@ -2923,7 +2995,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
         <div className="space-y-2.5 text-xs">
           {[
             { label: 'CPU',           value: stats.cpu_utilization != null ? `${stats.cpu_utilization}%` : null },
-            { label: 'Memory',        value: fmtMem(stats.mem_total, stats.mem_free) },
+            { label: 'Memory',        value: fmtMem(stats.mem_total, stats.mem_free, stats.mem_pct) },
             { label: 'PoE Consumed',  value: stats.poe_consumption  != null ? `${stats.poe_consumption} W` : null },
             { label: 'PoE Available', value: (stats.total_poe ?? stats.poe_budget) != null ? `${stats.total_poe ?? stats.poe_budget} W` : null },
             { label: 'Temperature',   value: stats.temperature != null ? `${stats.temperature} °C` : null },
