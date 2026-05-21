@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521h -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521i -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2751,10 +2751,12 @@ const DeviceFoundScreen = ({ summary, settings, api, onViewStatus, onProvision, 
           .then(sites => sites.find(s => String(s.id) === String(summary.currentSiteId))?.name || null)
       : Promise.resolve(null);
 
-    // Location name — resolve ID against GreenLake locations list
+    // Location name — fetch single location by ID
     const locPromise = summary.currentLocationId
-      ? api.glGetLocations({ token }).catch(() => [])
-          .then(locs => locs.find(l => String(l.id) === String(summary.currentLocationId))?.name || null)
+      ? proxyCall({ url: `${GL_BASE}/locations/v1/locations/${summary.currentLocationId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => d?.name || null)
+          .catch(() => null)
       : Promise.resolve(null);
 
     Promise.all([subPromise, appPromise, sitePromise, locPromise]).then(([sub, app, site, loc]) => {
@@ -2876,8 +2878,10 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
       : Promise.resolve(null);
 
     const locPromise = summary.currentLocationId
-      ? api.glGetLocations({ token }).catch(() => [])
-          .then(locs => locs.find(l => String(l.id) === String(summary.currentLocationId))?.name || null)
+      ? proxyCall({ url: `${GL_BASE}/locations/v1/locations/${summary.currentLocationId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => d?.name || null)
+          .catch(() => null)
       : Promise.resolve(null);
 
     Promise.all([statsPromise, sitesPromise, subPromise, locPromise]).then(([d, sites, sub, loc]) => {
