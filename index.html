@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520f -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520g -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2758,65 +2758,53 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4 min-h-0">
 
-        {/* Live status */}
-        {loading
-          ? <div className="flex flex-col items-center py-8 gap-3"><Spinner size={32} /><p className="text-gray-500 text-sm">Fetching live data…</p></div>
-          : stats ? (
-            <div className="rounded-2xl p-4" style={{
-              background: stats._source === 'nrm' ? 'rgba(99,102,241,0.07)' : 'rgba(16,185,129,0.07)',
-              border:     stats._source === 'nrm' ? '1px solid rgba(99,102,241,0.25)' : '1px solid rgba(16,185,129,0.2)',
-            }}>
-              <div className="flex items-center justify-between mb-3">
-                <p className={`text-xs font-bold uppercase tracking-widest ${stats._source === 'nrm' ? 'text-indigo-400' : 'text-emerald-400'}`}>
-                  {stats._source === 'nrm' ? 'Device Info' : 'Live Status'}
-                </p>
-                {stats._source === 'nrm' && (
-                  <span className="text-gray-600 text-xs">live monitoring unavailable on this cluster</span>
-                )}
-              </div>
+        {loading ? (
+          <div className="flex flex-col items-center py-8 gap-3">
+            <Spinner size={32} />
+            <p className="text-gray-500 text-sm">Fetching live data…</p>
+          </div>
+        ) : (<>
+
+          {/* ── SECTION 1: STATUS ───────────────────────────────────── */}
+          {stats && stats._source !== 'nrm' ? (
+            <div className="rounded-2xl p-4" style={{ background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.2)' }}>
+              <p className="text-emerald-400 text-xs font-bold uppercase tracking-widest mb-3">📶 Status</p>
               <div className="grid grid-cols-2 gap-3 text-xs">
-                {stats.status && (
-                  <div>
-                    <p className="text-gray-500 mb-0.5">Status</p>
-                    <p className={`font-semibold ${(stats.status || '').toLowerCase() === 'up' ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {(stats.status || '').toLowerCase() === 'up' ? '🟢' : '🔴'} {stats.status}
-                    </p>
-                  </div>
-                )}
-                {stats._source !== 'nrm' && (
-                  <div>
-                    <p className="text-gray-500 mb-0.5">Uptime</p>
-                    <p className="text-white font-medium">{fmtUptime(stats.uptime)}</p>
-                  </div>
-                )}
-                {stats._source !== 'nrm' && (
-                  <div>
-                    <p className="text-gray-500 mb-0.5">Clients</p>
-                    <p className="text-white font-medium">{stats.client_count ?? '—'}</p>
-                  </div>
-                )}
+                <div>
+                  <p className="text-gray-500 mb-0.5">Status</p>
+                  <p className={`font-semibold ${(stats.status || '').toLowerCase() === 'up' ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(stats.status || '').toLowerCase() === 'up' ? '🟢' : '🔴'} {stats.status || '—'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-gray-500 mb-0.5">Uptime</p>
+                  <p className="text-white font-medium">{fmtUptime(stats.uptime)}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500 mb-0.5">Clients</p>
+                  <p className="text-white font-medium">{stats.client_count ?? '—'}</p>
+                </div>
                 <div>
                   <p className="text-gray-500 mb-0.5">Firmware</p>
-                  <p className="text-white font-medium">{stats.firmware_version || '—'}</p>
+                  <p className="text-white font-medium truncate">{stats.firmware_version || '—'}</p>
                 </div>
-                {stats.ip_address && (
-                  <div className="col-span-2">
-                    <p className="text-gray-500 mb-0.5">IP Address</p>
-                    <p className="text-white font-mono font-medium">{stats.ip_address}</p>
-                  </div>
-                )}
-                {stats.mac && (
-                  <div className="col-span-2">
-                    <p className="text-gray-500 mb-0.5">MAC Address</p>
-                    <p className="text-white font-mono font-medium">{stats.mac}</p>
-                  </div>
-                )}
-                {stats.deployment && (
-                  <div>
-                    <p className="text-gray-500 mb-0.5">Deployment</p>
-                    <p className="text-white font-medium">{stats.deployment}</p>
-                  </div>
-                )}
+              </div>
+            </div>
+          ) : stats && stats._source === 'nrm' ? (
+            <div className="rounded-2xl p-4" style={{ background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.25)' }}>
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-indigo-400 text-xs font-bold uppercase tracking-widest">📦 Device Info</p>
+                <span className="text-gray-600 text-xs">config data — live monitoring unavailable</span>
+              </div>
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div>
+                  <p className="text-gray-500 mb-0.5">Model</p>
+                  <p className="text-white font-medium">{stats.model || summary.deviceModel || '—'}</p>
+                </div>
+                <div>
+                  <p className="text-gray-500 mb-0.5">Deployment</p>
+                  <p className="text-white font-medium">{stats.deployment || '—'}</p>
+                </div>
               </div>
             </div>
           ) : (
@@ -2824,67 +2812,105 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
               <p className="text-gray-500 text-sm">Live stats unavailable</p>
               <p className="text-gray-600 text-xs mt-1">Monitoring API not responding — check your Central cluster setting</p>
             </div>
-          )
-        }
+          )}
 
-        {/* RF stats (APs only) */}
-        {stats?.radios?.length > 0 && (
-          <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-            <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">RF Health</p>
-            <div className="space-y-3">
-              {stats.radios.map((r, i) => (
-                <div key={i} className="grid grid-cols-2 gap-2 text-xs pb-3 last:pb-0 last:border-0" style={{ borderBottom: i < stats.radios.length - 1 ? '1px solid rgba(255,255,255,0.06)' : 'none' }}>
-                  <div className="col-span-2">
-                    <p className="text-gray-300 font-semibold">{r.band || `Radio ${i + 1}`}</p>
+          {/* ── SECTION 2: NETWORK ──────────────────────────────────── */}
+          {stats && (stats.ip_address || stats.macaddr || stats.mac || stats.gateway_ip) && (
+            <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🌐 Network</p>
+              <div className="space-y-2.5 text-xs">
+                {[
+                  { label: 'IP Address',  value: stats.ip_address },
+                  { label: 'Gateway',     value: stats.gateway_ip },
+                  { label: 'MAC Address', value: stats.macaddr || stats.mac },
+                ].filter(r => r.value).map(r => (
+                  <div key={r.label} className="flex justify-between items-center">
+                    <span className="text-gray-500">{r.label}</span>
+                    <span className="text-gray-300 font-mono font-medium text-right max-w-[60%] truncate">{r.value}</span>
                   </div>
-                  <div><p className="text-gray-500 mb-0.5">Channel</p><p className="text-white font-medium">{r.channel ?? '—'}</p></div>
-                  <div><p className="text-gray-500 mb-0.5">Tx Power</p><p className="text-white font-medium">{r.tx_power != null ? `${r.tx_power} dBm` : '—'}</p></div>
-                  <div><p className="text-gray-500 mb-0.5">Utilization</p>
-                    <p className={`font-medium ${r.utilization > 70 ? 'text-red-400' : r.utilization > 40 ? 'text-yellow-400' : 'text-emerald-400'}`}>
-                      {r.utilization != null ? `${r.utilization}%` : '—'}
-                    </p>
-                  </div>
-                  <div><p className="text-gray-500 mb-0.5">Noise Floor</p><p className="text-white font-medium">{r.noise_floor != null ? `${r.noise_floor} dBm` : '—'}</p></div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* GreenLake assignments */}
-        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">GreenLake Assignments</p>
-          <div className="space-y-2.5 text-xs">
-            {[
-              { label: 'Subscription', value: summary.currentSubscriptionKey },
-              { label: 'Application',  value: summary.currentApplicationId ? 'Assigned' : null },
-              { label: 'Location',     value: summary.currentLocationId },
-            ].map(r => r.value && (
-              <div key={r.label} className="flex justify-between items-center">
-                <span className="text-gray-500">{r.label}</span>
-                <span className="text-gray-300 font-medium font-mono text-right max-w-[55%] truncate">{r.value}</span>
+          {/* ── SECTION 3: RF HEALTH (APs, from monitoring API) ─────── */}
+          {stats?.radios?.length > 0 && (
+            <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">📡 RF Health</p>
+              <div className="space-y-4">
+                {stats.radios.map((r, i) => (
+                  <div key={i}>
+                    <p className="text-gray-300 text-xs font-semibold mb-2 pb-1.5" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                      {r.band || r.radio_name || `Radio ${i + 1}`}
+                      {r.client_count != null && (
+                        <span className="text-gray-500 font-normal ml-2">· {r.client_count} client{r.client_count !== 1 ? 's' : ''}</span>
+                      )}
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div>
+                        <p className="text-gray-500 mb-0.5">Channel</p>
+                        <p className="text-white font-medium">{r.channel ?? '—'}</p>
+                      </div>
+                      <div>
+                        <p className="text-gray-500 mb-0.5">Tx Power</p>
+                        <p className="text-white font-medium">{r.tx_power != null ? `${r.tx_power} dBm` : '—'}</p>
+                      </div>
+                      <div>
+                        <p className="text-gray-500 mb-0.5">Utilization</p>
+                        <p className={`font-medium ${r.utilization > 70 ? 'text-red-400' : r.utilization > 40 ? 'text-yellow-400' : 'text-emerald-400'}`}>
+                          {r.utilization != null ? `${r.utilization}%` : '—'}
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-gray-500 mb-0.5">Noise Floor</p>
+                        <p className="text-white font-medium">{r.noise_floor != null ? `${r.noise_floor} dBm` : '—'}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </div>
+            </div>
+          )}
 
-        {/* Central assignments */}
-        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">Aruba Central</p>
-          <div className="space-y-2.5 text-xs">
-            {[
-              { label: 'Site',     value: siteName || (summary.currentSiteId ? '…' : null) },
-              { label: 'Function', value: summary.currentFunctionId },
-              { label: 'Hostname', value: stats?.name || null },
-            ].map(r => r.value && (
-              <div key={r.label} className="flex justify-between items-center">
-                <span className="text-gray-500">{r.label}</span>
-                <span className="text-gray-300 font-medium font-mono text-right max-w-[55%] truncate">{r.value}</span>
+          {/* ── SECTION 4: GREENLAKE ASSIGNMENTS ────────────────────── */}
+          {(summary.currentSubscriptionKey || summary.currentApplicationId || summary.currentLocationId) && (
+            <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">GreenLake Assignments</p>
+              <div className="space-y-2.5 text-xs">
+                {[
+                  { label: 'Subscription', value: summary.currentSubscriptionKey },
+                  { label: 'Application',  value: summary.currentApplicationId ? 'Assigned' : null },
+                  { label: 'Location',     value: summary.currentLocationId },
+                ].filter(r => r.value).map(r => (
+                  <div key={r.label} className="flex justify-between items-center">
+                    <span className="text-gray-500">{r.label}</span>
+                    <span className="text-gray-300 font-medium font-mono text-right max-w-[55%] truncate">{r.value}</span>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </div>
+            </div>
+          )}
 
+          {/* ── SECTION 5: ARUBA CENTRAL ────────────────────────────── */}
+          {(siteName || summary.currentSiteId || summary.currentFunctionId || stats?.name) && (
+            <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">Aruba Central</p>
+              <div className="space-y-2.5 text-xs">
+                {[
+                  { label: 'Site',     value: siteName || (summary.currentSiteId ? '…' : null) },
+                  { label: 'Function', value: summary.currentFunctionId },
+                  { label: 'Hostname', value: stats?.name || null },
+                ].filter(r => r.value).map(r => (
+                  <div key={r.label} className="flex justify-between items-center">
+                    <span className="text-gray-500">{r.label}</span>
+                    <span className="text-gray-300 font-medium font-mono text-right max-w-[55%] truncate">{r.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+        </>)}
       </div>
 
       {/* Update button */}
