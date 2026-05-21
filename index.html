@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521f -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521g -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1118,6 +1118,27 @@ const liveApi = {
       };
     };
 
+    // Normalize internal cluster network-monitoring/v1 gateway response
+    const normalizeNetMonGateway = d => ({
+      _source:         'internal-gateway',
+      status:          d.status,                // "Online"
+      uptime:          d.uptimeInMillis != null ? Math.round(d.uptimeInMillis / 1000) : null,
+      firmware_version: d.firmwareVersion       || null,
+      name:            d.deviceName             || null,
+      ip_address:      d.ipAddress              || d.ipv4 || null,
+      macaddr:         d.macAddress             || null,
+      mac_range:       d.macRange               || null,
+      model:           d.model                  || null,
+      role:            d.role                   || null,    // "Isoleader", "Follower", etc.
+      device_function: d.deviceFunction         || null,    // "Mobility Gateway", "Branch Gateway"
+      mode:            d.mode                   || null,
+      cluster_name:    d.clusterName            || null,
+      site_name:       d.siteName               || null,
+      cpu_utilization: d.cpuUtilization         ?? null,
+      mem_pct:         d.memoryUtilization      ?? null,
+      last_restart:    d.rebootReason           || null,
+    });
+
     try {
       const type = (deviceType || '').toUpperCase();
       let paths = [];
@@ -1167,9 +1188,9 @@ const liveApi = {
         if (device) {
           // Normalise internal cluster network-monitoring response to standard shape
           if (path.includes('/network-monitoring/')) {
-            if (type === 'AP' || type === 'IAP')  device = normalizeNetMonAp(device);
-            else if (type === 'SWITCH')            device = normalizeNetMonSwitch(device);
-            // Gateway normaliser will be added once we have a real response example
+            if (type === 'AP' || type === 'IAP')              device = normalizeNetMonAp(device);
+            else if (type === 'SWITCH')                        device = normalizeNetMonSwitch(device);
+            else if (type === 'GATEWAY' || type === 'GW')     device = normalizeNetMonGateway(device);
           }
           console.log('[centralGetDeviceStats] found via', path, '| status:', device.status);
           return device;
@@ -3086,11 +3107,12 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
   // ── Gateway-specific sections ─────────────────────────────────────────────────
   const GatewaySections = () => (<>
     <StatusCard extra={[
-      { label: 'Uptime',   value: fmtUptime(stats.uptime) },
-      { label: 'Model',    value: stats.model || summary.deviceModel },
-      { label: 'Role',     value: stats.role },
-      { label: 'Function', value: stats.mode || stats.device_function || stats.device_mode },
-      { label: 'Firmware', value: stats.firmware_version, wide: true },
+      { label: 'Uptime',    value: fmtUptime(stats.uptime) },
+      { label: 'Model',     value: stats.model || summary.deviceModel },
+      { label: 'Role',      value: stats.role },
+      { label: 'Function',  value: stats.device_function || stats.mode || null },
+      { label: 'Firmware',  value: stats.firmware_version, wide: true },
+      { label: 'Cluster',   value: stats.cluster_name, wide: true },
     ]} />
 
     <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
@@ -3099,6 +3121,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
         {[
           { label: 'IP Address',  value: stats.ip_address },
           { label: 'MAC Address', value: stats.macaddr || stats.mac },
+          { label: 'MAC Range',   value: stats.mac_range },
           { label: 'Device Name', value: stats.name },
         ].filter(r => r.value).map(r => (
           <div key={r.label} className="flex justify-between items-center">
@@ -3109,13 +3132,13 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
       </div>
     </div>
 
-    {(stats.cpu_utilization != null || stats.mem_total) && (
+    {(stats.cpu_utilization != null || stats.mem_pct != null) && (
       <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
         <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">⚙️ Resources</p>
         <div className="space-y-2.5 text-xs">
           {[
             { label: 'CPU',    value: stats.cpu_utilization != null ? `${stats.cpu_utilization}%` : null },
-            { label: 'Memory', value: fmtMem(stats.mem_total, stats.mem_free) },
+            { label: 'Memory', value: fmtMem(stats.mem_total, stats.mem_free, stats.mem_pct) },
           ].filter(r => r.value).map(r => (
             <div key={r.label} className="flex justify-between items-center">
               <span className="text-gray-500">{r.label}</span>
@@ -3123,6 +3146,13 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
             </div>
           ))}
         </div>
+      </div>
+    )}
+
+    {stats.last_restart && (
+      <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-2">🔄 Last Reboot</p>
+        <p className="text-gray-300 text-xs font-mono">{stats.last_restart}</p>
       </div>
     )}
   </>);
