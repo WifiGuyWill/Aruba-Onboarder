@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260520g -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521a -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -2704,7 +2704,6 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
     const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
     const centralToken = settings.centralToken || settings.token;
 
-    // Fetch live stats and site list in parallel
     const statsPromise = api.centralGetDeviceStats({
       serial: summary.serial,
       deviceType: summary.deviceType,
@@ -2723,22 +2722,260 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
         const match = sites.find(s => String(s.id) === String(summary.currentSiteId));
         if (match) resolvedName = match.name;
       }
-      // NRM device data includes siteName directly — use as fallback
       if (!resolvedName && d?.siteName) resolvedName = d.siteName;
       if (resolvedName) setSiteName(resolvedName);
       setLoading(false);
     });
   }, []);
 
-  const typeEmoji = summary.deviceType === 'AP' ? '📡' : summary.deviceType === 'SWITCH' ? '🔀' : summary.deviceType === 'GATEWAY' ? '🌐' : '📦';
+  // ── Shared helpers ────────────────────────────────────────────────────────────
+  const isUp       = (stats?.status || '').toLowerCase() === 'up';
+  const typeEmoji  = summary.deviceType === 'AP' ? '📡' : summary.deviceType === 'SWITCH' ? '🔀' : summary.deviceType === 'GATEWAY' ? '🌐' : '📦';
+  const isNrm      = stats?._source === 'nrm';
 
   const fmtUptime = secs => {
     if (!secs) return '—';
-    const d = Math.floor(secs / 86400);
-    const h = Math.floor((secs % 86400) / 3600);
-    const m = Math.floor((secs % 3600) / 60);
+    const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
     return [d && `${d}d`, h && `${h}h`, m && `${m}m`].filter(Boolean).join(' ') || '<1m';
   };
+  const fmtLastSeen = ts => {
+    if (!ts) return null;
+    // ts may be seconds or milliseconds
+    const ms = ts > 1e12 ? ts : ts * 1000;
+    const d  = new Date(ms);
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+  const fmtMem = (total, free) => {
+    if (!total) return null;
+    const used = total - (free || 0);
+    const pct  = Math.round((used / total) * 100);
+    const mb   = v => `${Math.round(v / 1024)} MB`;
+    return `${mb(used)} / ${mb(total)} (${pct}%)`;
+  };
+  const fmtRate = bps => {
+    if (bps == null) return '—';
+    if (bps >= 1e9)  return `${(bps / 1e9).toFixed(1)} Gbps`;
+    if (bps >= 1e6)  return `${(bps / 1e6).toFixed(1)} Mbps`;
+    if (bps >= 1e3)  return `${(bps / 1e3).toFixed(0)} Kbps`;
+    return `${bps} bps`;
+  };
+
+  // ── Shared status header card ─────────────────────────────────────────────────
+  const StatusCard = ({ extra = [] }) => {
+    const borderColor = isUp ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)';
+    const bgColor     = isUp ? 'rgba(16,185,129,0.07)' : 'rgba(239,68,68,0.05)';
+    const dotColor    = isUp ? 'bg-emerald-400' : 'bg-red-500';
+    const dotGlow     = isUp ? '0 0 6px #10b981' : '0 0 6px #ef4444';
+    return (
+      <div className="rounded-2xl p-4" style={{ background: bgColor, border: `1px solid ${borderColor}` }}>
+        <div className="flex items-center gap-2 mb-3">
+          <span className={`w-2.5 h-2.5 rounded-full ${dotColor} shrink-0`} style={{ boxShadow: dotGlow }} />
+          <p className="text-white text-xs font-bold uppercase tracking-widest">{isUp ? 'Online' : 'Offline'}</p>
+        </div>
+        <div className="grid grid-cols-2 gap-3 text-xs">
+          {!isUp && stats?.last_modified && (
+            <div className="col-span-2">
+              <p className="text-gray-500 mb-0.5">Last Seen</p>
+              <p className="text-gray-300 font-medium">{fmtLastSeen(stats.last_modified)}</p>
+            </div>
+          )}
+          {extra.filter(r => r.value != null && r.value !== '').map(r => (
+            <div key={r.label} className={r.wide ? 'col-span-2' : ''}>
+              <p className="text-gray-500 mb-0.5">{r.label}</p>
+              <p className={`font-medium truncate ${r.color || 'text-white'}`}>{r.value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ── AP-specific sections ──────────────────────────────────────────────────────
+  const ApSections = () => (<>
+    <StatusCard extra={[
+      { label: 'Uptime',           value: fmtUptime(stats.uptime) },
+      { label: 'Firmware',         value: stats.firmware_version,               wide: true },
+      { label: 'Negotiated Power', value: stats.poe_consumption != null ? `${stats.poe_consumption} W` : (stats.negotiated_power != null ? `${stats.negotiated_power} W` : null) },
+      { label: 'Clients',          value: stats.client_count != null ? String(stats.client_count) : null },
+    ]} />
+
+    {/* RF per-radio */}
+    {stats.radios?.length > 0 && (
+      <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">📡 Radio</p>
+        <div className="space-y-4">
+          {stats.radios.map((r, i) => {
+            const band = r.band || r.radio_name || `Radio ${i + 1}`;
+            return (
+              <div key={i}>
+                <p className="text-gray-300 text-xs font-semibold mb-2 pb-1.5" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                  {band}
+                  {r.client_count != null && <span className="text-gray-500 font-normal ml-2">· {r.client_count} client{r.client_count !== 1 ? 's' : ''}</span>}
+                </p>
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div><p className="text-gray-500 mb-0.5">Channel</p><p className="text-white font-medium">{r.channel ?? '—'}{r.bandwidth ? ` / ${r.bandwidth} MHz` : ''}</p></div>
+                  <div><p className="text-gray-500 mb-0.5">Tx Power</p><p className="text-white font-medium">{r.tx_power != null ? `${r.tx_power} dBm` : '—'}</p></div>
+                  <div>
+                    <p className="text-gray-500 mb-0.5">Utilization</p>
+                    <p className={`font-medium ${r.utilization > 70 ? 'text-red-400' : r.utilization > 40 ? 'text-yellow-400' : 'text-emerald-400'}`}>
+                      {r.utilization != null ? `${r.utilization}%` : '—'}
+                    </p>
+                  </div>
+                  <div><p className="text-gray-500 mb-0.5">Noise Floor</p><p className="text-white font-medium">{r.noise_floor != null ? `${r.noise_floor} dBm` : '—'}</p></div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    )}
+  </>);
+
+  // ── Switch-specific sections ──────────────────────────────────────────────────
+  const SwitchSections = () => {
+    const uplinkTotal = (() => {
+      const ports = stats.uplink_ports || stats.ports?.filter(p => p.is_uplink) || [];
+      if (!ports.length) return null;
+      const inSum  = ports.reduce((s, p) => s + (p.in_traffic  || p.in_rate  || 0), 0);
+      const outSum = ports.reduce((s, p) => s + (p.out_traffic || p.out_rate || 0), 0);
+      return { in: inSum, out: outSum, count: ports.length };
+    })();
+
+    const healthVal = stats.health_score ?? stats.health ?? null;
+    const healthColor = healthVal == null ? 'text-white' : healthVal >= 80 ? 'text-emerald-400' : healthVal >= 50 ? 'text-yellow-400' : 'text-red-400';
+
+    return (<>
+      <StatusCard extra={[
+        { label: 'Uptime',       value: fmtUptime(stats.uptime) },
+        { label: 'Model',        value: stats.model || summary.deviceModel },
+        { label: 'Switch Type',  value: stats.switch_type },
+        { label: 'Health',       value: healthVal != null ? `${healthVal}/100` : null, color: healthColor },
+        { label: 'Firmware',     value: stats.firmware_version, wide: true },
+      ]} />
+
+      {/* Network */}
+      {(stats.ip_address || stats.public_ip_address) && (
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🌐 Network</p>
+          <div className="space-y-2.5 text-xs">
+            {[
+              { label: 'IPv4 Address', value: stats.ip_address },
+              { label: 'Public IP',    value: stats.public_ip_address },
+            ].filter(r => r.value).map(r => (
+              <div key={r.label} className="flex justify-between items-center">
+                <span className="text-gray-500">{r.label}</span>
+                <span className="text-gray-300 font-mono font-medium text-right max-w-[60%] truncate">{r.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Resources */}
+      <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">⚙️ Resources</p>
+        <div className="space-y-2.5 text-xs">
+          {[
+            { label: 'CPU',           value: stats.cpu_utilization != null ? `${stats.cpu_utilization}%` : null },
+            { label: 'Memory',        value: fmtMem(stats.mem_total, stats.mem_free) },
+            { label: 'PoE Consumed',  value: stats.poe_consumption  != null ? `${stats.poe_consumption} W` : null },
+            { label: 'PoE Available', value: (stats.total_poe ?? stats.poe_budget) != null ? `${stats.total_poe ?? stats.poe_budget} W` : null },
+            { label: 'Temperature',   value: stats.temperature != null ? `${stats.temperature} °C` : null },
+          ].filter(r => r.value).map(r => (
+            <div key={r.label} className="flex justify-between items-center">
+              <span className="text-gray-500">{r.label}</span>
+              <span className="text-gray-300 font-medium text-right">{r.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Uplinks */}
+      {uplinkTotal && (
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🔗 Uplinks <span className="font-normal normal-case text-gray-600">({uplinkTotal.count} port{uplinkTotal.count !== 1 ? 's' : ''})</span></p>
+          <div className="space-y-2.5 text-xs">
+            {[
+              { label: 'In',  value: fmtRate(uplinkTotal.in)  },
+              { label: 'Out', value: fmtRate(uplinkTotal.out) },
+            ].map(r => (
+              <div key={r.label} className="flex justify-between items-center">
+                <span className="text-gray-500">{r.label}</span>
+                <span className="text-gray-300 font-medium">{r.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>);
+  };
+
+  // ── Gateway-specific sections ─────────────────────────────────────────────────
+  const GatewaySections = () => (<>
+    <StatusCard extra={[
+      { label: 'Uptime',   value: fmtUptime(stats.uptime) },
+      { label: 'Model',    value: stats.model || summary.deviceModel },
+      { label: 'Role',     value: stats.role },
+      { label: 'Function', value: stats.mode || stats.device_function || stats.device_mode },
+      { label: 'Firmware', value: stats.firmware_version, wide: true },
+    ]} />
+
+    <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+      <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🌐 Network</p>
+      <div className="space-y-2.5 text-xs">
+        {[
+          { label: 'IP Address',  value: stats.ip_address },
+          { label: 'MAC Address', value: stats.macaddr || stats.mac },
+          { label: 'Device Name', value: stats.name },
+        ].filter(r => r.value).map(r => (
+          <div key={r.label} className="flex justify-between items-center">
+            <span className="text-gray-500">{r.label}</span>
+            <span className="text-gray-300 font-mono font-medium text-right max-w-[60%] truncate">{r.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    {(stats.cpu_utilization != null || stats.mem_total) && (
+      <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">⚙️ Resources</p>
+        <div className="space-y-2.5 text-xs">
+          {[
+            { label: 'CPU',    value: stats.cpu_utilization != null ? `${stats.cpu_utilization}%` : null },
+            { label: 'Memory', value: fmtMem(stats.mem_total, stats.mem_free) },
+          ].filter(r => r.value).map(r => (
+            <div key={r.label} className="flex justify-between items-center">
+              <span className="text-gray-500">{r.label}</span>
+              <span className="text-gray-300 font-medium">{r.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    )}
+  </>);
+
+  // ── NRM fallback (internal cluster — config data only) ────────────────────────
+  const NrmSection = () => (
+    <div className="rounded-2xl p-4" style={{ background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.25)' }}>
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-indigo-400 text-xs font-bold uppercase tracking-widest">📦 Device Info</p>
+        <span className="text-gray-600 text-xs">config data — live monitoring unavailable</span>
+      </div>
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        {[
+          { label: 'Model',       value: stats.model || summary.deviceModel },
+          { label: 'Deployment',  value: stats.deployment },
+          { label: 'IP Address',  value: stats.ip_address,       wide: true },
+          { label: 'MAC Address', value: stats.macaddr || stats.mac, wide: true },
+        ].filter(r => r.value).map(r => (
+          <div key={r.label} className={r.wide ? 'col-span-2' : ''}>
+            <p className="text-gray-500 mb-0.5">{r.label}</p>
+            <p className="text-white font-medium font-mono truncate">{r.value}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 
   return (
     <div className="flex flex-col" style={{ height: 'calc(100dvh - 120px)' }}>
@@ -2749,9 +2986,9 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
           <p className="text-white font-bold">{typeEmoji} {summary.deviceModel || 'Device Status'}</p>
           <p className="text-gray-500 text-xs font-mono truncate">{summary.serial}</p>
         </div>
-        {stats && (
-          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${(stats.status || '').toLowerCase() === 'up' ? 'bg-emerald-400' : 'bg-red-400'}`}
-            style={{ boxShadow: (stats.status || '').toLowerCase() === 'up' ? '0 0 6px #10b981' : '0 0 6px #ef4444' }} />
+        {stats && !isNrm && (
+          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${isUp ? 'bg-emerald-400' : 'bg-red-500'}`}
+            style={{ boxShadow: isUp ? '0 0 6px #10b981' : '0 0 6px #ef4444' }} />
         )}
       </div>
 
@@ -2765,114 +3002,30 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
           </div>
         ) : (<>
 
-          {/* ── SECTION 1: STATUS ───────────────────────────────────── */}
-          {stats && stats._source !== 'nrm' ? (
-            <div className="rounded-2xl p-4" style={{ background: 'rgba(16,185,129,0.07)', border: '1px solid rgba(16,185,129,0.2)' }}>
-              <p className="text-emerald-400 text-xs font-bold uppercase tracking-widest mb-3">📶 Status</p>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div>
-                  <p className="text-gray-500 mb-0.5">Status</p>
-                  <p className={`font-semibold ${(stats.status || '').toLowerCase() === 'up' ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {(stats.status || '').toLowerCase() === 'up' ? '🟢' : '🔴'} {stats.status || '—'}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-gray-500 mb-0.5">Uptime</p>
-                  <p className="text-white font-medium">{fmtUptime(stats.uptime)}</p>
-                </div>
-                <div>
-                  <p className="text-gray-500 mb-0.5">Clients</p>
-                  <p className="text-white font-medium">{stats.client_count ?? '—'}</p>
-                </div>
-                <div>
-                  <p className="text-gray-500 mb-0.5">Firmware</p>
-                  <p className="text-white font-medium truncate">{stats.firmware_version || '—'}</p>
-                </div>
-              </div>
-            </div>
-          ) : stats && stats._source === 'nrm' ? (
-            <div className="rounded-2xl p-4" style={{ background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.25)' }}>
-              <div className="flex items-center justify-between mb-3">
-                <p className="text-indigo-400 text-xs font-bold uppercase tracking-widest">📦 Device Info</p>
-                <span className="text-gray-600 text-xs">config data — live monitoring unavailable</span>
-              </div>
-              <div className="grid grid-cols-2 gap-3 text-xs">
-                <div>
-                  <p className="text-gray-500 mb-0.5">Model</p>
-                  <p className="text-white font-medium">{stats.model || summary.deviceModel || '—'}</p>
-                </div>
-                <div>
-                  <p className="text-gray-500 mb-0.5">Deployment</p>
-                  <p className="text-white font-medium">{stats.deployment || '—'}</p>
-                </div>
-              </div>
-            </div>
-          ) : (
+          {/* Device-type-specific stat sections */}
+          {!stats ? (
             <div className="rounded-2xl p-4 text-center" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
               <p className="text-gray-500 text-sm">Live stats unavailable</p>
               <p className="text-gray-600 text-xs mt-1">Monitoring API not responding — check your Central cluster setting</p>
             </div>
+          ) : isNrm ? (
+            <NrmSection />
+          ) : summary.deviceType === 'AP' ? (
+            <ApSections />
+          ) : summary.deviceType === 'SWITCH' ? (
+            <SwitchSections />
+          ) : summary.deviceType === 'GATEWAY' ? (
+            <GatewaySections />
+          ) : (
+            /* Unknown type — generic status + all fields */
+            <StatusCard extra={[
+              { label: 'Uptime',   value: fmtUptime(stats.uptime) },
+              { label: 'Firmware', value: stats.firmware_version },
+              { label: 'IP',       value: stats.ip_address },
+            ]} />
           )}
 
-          {/* ── SECTION 2: NETWORK ──────────────────────────────────── */}
-          {stats && (stats.ip_address || stats.macaddr || stats.mac || stats.gateway_ip) && (
-            <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-              <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🌐 Network</p>
-              <div className="space-y-2.5 text-xs">
-                {[
-                  { label: 'IP Address',  value: stats.ip_address },
-                  { label: 'Gateway',     value: stats.gateway_ip },
-                  { label: 'MAC Address', value: stats.macaddr || stats.mac },
-                ].filter(r => r.value).map(r => (
-                  <div key={r.label} className="flex justify-between items-center">
-                    <span className="text-gray-500">{r.label}</span>
-                    <span className="text-gray-300 font-mono font-medium text-right max-w-[60%] truncate">{r.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* ── SECTION 3: RF HEALTH (APs, from monitoring API) ─────── */}
-          {stats?.radios?.length > 0 && (
-            <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
-              <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">📡 RF Health</p>
-              <div className="space-y-4">
-                {stats.radios.map((r, i) => (
-                  <div key={i}>
-                    <p className="text-gray-300 text-xs font-semibold mb-2 pb-1.5" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
-                      {r.band || r.radio_name || `Radio ${i + 1}`}
-                      {r.client_count != null && (
-                        <span className="text-gray-500 font-normal ml-2">· {r.client_count} client{r.client_count !== 1 ? 's' : ''}</span>
-                      )}
-                    </p>
-                    <div className="grid grid-cols-2 gap-2 text-xs">
-                      <div>
-                        <p className="text-gray-500 mb-0.5">Channel</p>
-                        <p className="text-white font-medium">{r.channel ?? '—'}</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500 mb-0.5">Tx Power</p>
-                        <p className="text-white font-medium">{r.tx_power != null ? `${r.tx_power} dBm` : '—'}</p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500 mb-0.5">Utilization</p>
-                        <p className={`font-medium ${r.utilization > 70 ? 'text-red-400' : r.utilization > 40 ? 'text-yellow-400' : 'text-emerald-400'}`}>
-                          {r.utilization != null ? `${r.utilization}%` : '—'}
-                        </p>
-                      </div>
-                      <div>
-                        <p className="text-gray-500 mb-0.5">Noise Floor</p>
-                        <p className="text-white font-medium">{r.noise_floor != null ? `${r.noise_floor} dBm` : '—'}</p>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* ── SECTION 4: GREENLAKE ASSIGNMENTS ────────────────────── */}
+          {/* GreenLake Assignments */}
           {(summary.currentSubscriptionKey || summary.currentApplicationId || summary.currentLocationId) && (
             <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
               <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">GreenLake Assignments</p>
@@ -2891,7 +3044,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
             </div>
           )}
 
-          {/* ── SECTION 5: ARUBA CENTRAL ────────────────────────────── */}
+          {/* Aruba Central */}
           {(siteName || summary.currentSiteId || summary.currentFunctionId || stats?.name) && (
             <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
               <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">Aruba Central</p>
