@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521l -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521m -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1281,24 +1281,38 @@ const liveApi = {
     const resolvedPersona = persona || 'CAMPUS_AP';
     const baseUrl = `https://${centralUrl}/network-config/v1alpha1/system-info` +
       `?scope-id=${encodeURIComponent(scopeId)}&persona=${resolvedPersona}&object_type=LOCAL`;
-    const body = { hostname };
 
-    console.log(`[centralSetHostname] scope_id=${scopeId} persona=${resolvedPersona} hostnameExists=${hostnameExists}`);
+    // New Central (internal cluster) uses a YANG model where hostname is nested inside
+    // a 'profile' container. Profile name is persona-dependent.
+    // Standard Central uses a flat { hostname } body.
+    // Try profile-wrapped first, then flat as fallback.
+    const profileName = resolvedPersona.includes('SWITCH') ? 'sys-system-info-profile' : 'default_sys_info';
+    const bodies = [
+      { profile: [{ name: profileName, hostname }] },  // New Central / internal cluster
+      { hostname },                                      // Standard Central fallback
+    ];
 
-    // When no hostname is set, we must POST to create the record.
-    // When one exists, PATCH updates it.
-    // We always try both in case hostnameExists was detected incorrectly.
+    // When no hostname is set, POST to create; when one exists, PATCH to update.
+    // Always try both in case hostnameExists was detected incorrectly.
     const methods = hostnameExists ? ['PATCH', 'POST'] : ['POST', 'PATCH'];
 
-    for (const method of methods) {
-      try {
-        console.log(`[centralSetHostname] ${method} ${baseUrl}`);
-        const res = await proxyCall({ url: baseUrl, method, token: centralToken, body });
-        const txt = !res.ok ? await res.clone().text() : '';
-        console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
-        if (res.ok) return res.json().catch(() => ({ success: true }));
-        errors.push(`${method} → ${res.status}: ${txt.slice(0, 200)}`);
-      } catch (e) { errors.push(`${method} → ${e.message}`); }
+    console.log(`[centralSetHostname] scope_id=${scopeId} persona=${resolvedPersona} profileName=${profileName} hostnameExists=${hostnameExists}`);
+
+    for (const body of bodies) {
+      for (const method of methods) {
+        try {
+          console.log(`[centralSetHostname] ${method} ${baseUrl}`, JSON.stringify(body));
+          const res = await proxyCall({ url: baseUrl, method, token: centralToken, body });
+          const txt = !res.ok ? await res.clone().text() : '';
+          console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
+          if (res.ok) return res.json().catch(() => ({ success: true }));
+          errors.push(`${method}+${Object.keys(body)[0]} → ${res.status}: ${txt.slice(0, 200)}`);
+        } catch (e) { errors.push(`${method} → ${e.message}`); }
+      }
+      // If the first body format succeeded for any method we'd have returned already.
+      // If all methods failed for this body format with "not found as child", move on.
+      const allNotFound = errors.every(e => e.includes('not found'));
+      if (!allNotFound) break; // Non-schema error — don't try more body formats
     }
 
     throw new Error(`Hostname update failed.\n${errors.join('\n')}`);
