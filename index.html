@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260519d -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521m -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -113,6 +113,27 @@ function filterSubscriptions(subs, deviceType) {
     return Number(b.availableQuantity || 0) - Number(a.availableQuantity || 0);
   });
 }
+
+// Maps human-readable deviceFunction / persona labels (network-monitoring API) → persona IDs
+const DEVICE_FUNCTION_LABEL_TO_PERSONA = {
+  // APs
+  'campus access point':  'CAMPUS_AP',
+  'campus ap':            'CAMPUS_AP',
+  'microbranch ap':       'MICROBRANCH_AP',
+  // Gateways
+  'mobility gateway':     'MOBILITY_GW',
+  'branch gateway':       'BRANCH_GW',
+  'vpn concentrator':     'VPNC',
+  // Switches
+  'access switch':        'ACCESS_SWITCH',
+  'aggregation switch':   'AGG_SWITCH',
+  'core switch':          'CORE_SWITCH',
+  'aoss access':          'AOSS_ACCESS_SWITCH',
+  'aoss aggregation':     'AOSS_AGG_SWITCH',
+  'aoss core':            'AOSS_CORE_SWITCH',
+  // Other
+  'bridge':               'BRIDGE',
+};
 
 // Maps Central device_type → allowed persona IDs (matches Central UI logic)
 const PERSONA_BY_DEVICE_TYPE = {
@@ -812,30 +833,43 @@ const liveApi = {
   },
 
   // Lightweight Central lookup: returns the siteId and persona currently assigned to a device.
-  // Uses the config-devices list which already contains both fields per device.
+  // Uses the network-monitoring devices list which contains persona (human-readable label),
+  // deviceFunction, siteId for all device types reliably.
   // Called as a background task right after scan so SiteScreen + FunctionScreen can be pre-populated.
   // Returns { siteId: string|null, persona: string|null }
   async centralGetDeviceSiteId({ serial, centralToken, centralUrl }) {
     if (!centralToken || !centralUrl || !serial) return { siteId: null, persona: null };
-    try {
-      const res = await proxyCall({
-        url: `https://${centralUrl}/network-config/v1alpha1/devices?serial=${encodeURIComponent(serial)}`,
-        token: centralToken,
-      });
-      if (!res.ok) return { siteId: null, persona: null };
-      const d = await res.json();
-      const items = d.items || d.devices || (Array.isArray(d) ? d : []);
-      const match = items.find(item =>
-        String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
-      );
-      const siteId  = match?.siteId  || match?.site_id  || null;
-      const persona = match?.persona || null;
-      console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
-      return { siteId: siteId ? String(siteId) : null, persona: persona || null };
-    } catch (e) {
-      console.warn('[centralGetDeviceSiteId] failed:', e.message);
-      return { siteId: null, persona: null };
+    const s = encodeURIComponent(serial);
+    // Try the network-monitoring devices list (v1alpha1) — returns persona + siteId reliably.
+    // The filter param may or may not be server-side; we always do client-side matching too.
+    for (const path of [
+      `/network-monitoring/v1alpha1/devices?serial=${s}`,
+      `/network-monitoring/v1alpha1/devices`,
+    ]) {
+      try {
+        const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
+        console.log(`[centralGetDeviceSiteId] ${path} → ${res.status}`);
+        if (!res.ok) continue;
+        const d = await res.json();
+        const items = d.items || d.devices || (Array.isArray(d) ? d : []);
+        const match = items.find(item =>
+          String(item.serialNumber || item.serial || item.scopeName || item.id || '').toUpperCase() === serial.toUpperCase()
+        );
+        if (!match) continue;
+
+        const siteId = match?.siteId || match?.site_id || null;
+        // persona comes as a human-readable label: "Campus Access Point", "Mobility Gateway", etc.
+        let persona = match?.persona || match?.deviceFunction || match?.['device-function'] || null;
+        if (persona === 'None' || persona === 'NONE' || persona === 'none') persona = null;
+        // Map label → persona ID
+        if (persona) persona = DEVICE_FUNCTION_LABEL_TO_PERSONA[persona.toLowerCase()] || persona;
+        console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
+        return { siteId: siteId ? String(siteId) : null, persona: persona || null };
+      } catch (e) {
+        console.warn(`[centralGetDeviceSiteId] ${path} failed:`, e.message);
+      }
     }
+    return { siteId: null, persona: null };
   },
 
   // Central: assign a device to a site.
@@ -1053,6 +1087,189 @@ const liveApi = {
   //
   // The persona param (CAMPUS_AP, ACCESS_SWITCH, BRANCH_GW…) is REQUIRED — without it,
   // the API returns 200 but silently ignores the change (wrong config layer targeted).
+  // Central: fetch live device stats from the monitoring API.
+  // Returns status, uptime, firmware, client count, IP, and radio details.
+  // Tries device-type-specific endpoints; returns null if device not found or Central unavailable.
+  async centralGetDeviceStats({ serial, deviceType, centralToken, centralUrl }) {
+    if (!centralToken || !centralUrl || !serial) return null;
+
+    // Normalize the internal cluster's network-monitoring/v1alpha1 AP response
+    // to the same shape our UI expects from the standard monitoring API.
+    const normalizeNetMonAp = d => ({
+      _source:           'internal-ap',
+      status:            d.status,            // "ONLINE" / "OFFLINE"
+      uptime:            d.uptimeInMillis != null ? Math.round(d.uptimeInMillis / 1000) : null,
+      firmware_version:  d.firmwareVersion   || d.softwareVersion || null,
+      name:              d.deviceName        || null,
+      ip_address:        d.ipv4              || null,
+      public_ip_address: d.publicIpv4        || null,
+      subnet_mask:       d.subnetMask        || null,
+      gateway_ip:        (d.defaultGateway   || '').replace(/\s*\(.*\)\s*$/, '').trim() || null,
+      macaddr:           d.macAddress        || null,
+      model:             d.model             || null,
+      negotiated_power:  d.negotiatedPower   || null,   // "802.3at" — a standard name, not watts
+      client_count:      d.apStats?.[0]?.clientCount     ?? null,
+      cpu_utilization:   d.apStats?.[0]?.cpuUtilization  ?? null,
+      mem_pct:           d.apStats?.[0]?.memoryUtilization ?? null,
+      bandSelection:     d.bandSelection     || null,
+      radios: (d.radios || []).map(r => ({
+        band:        r.band        || null,
+        channel:     r.channel     || null,
+        bandwidth:   r.bandwidth   || null,      // "20 MHz", "80 MHz", "160 MHz"
+        tx_power:    r.power       != null ? parseInt(r.power)  : null,
+        utilization: r.radioStats?.[0]?.channelUtilization != null ? parseInt(r.radioStats[0].channelUtilization) : null,
+        noise_floor: r.radioStats?.[0]?.noiseFloor         != null ? parseInt(r.radioStats[0].noiseFloor)         : null,
+        status:      r.status      || null,
+        wlans:       r.wlans       || [],
+        spatialStream: r.spatialStream || null,
+        radioType:   r.radioType   || null,
+      })),
+    });
+
+    // Normalize internal cluster network-monitoring/v1 switch response
+    const normalizeNetMonSwitch = d => {
+      const tr = d.switchTrends?.[0] || {};
+      return {
+        _source:           'internal-switch',
+        status:            d.status,             // "Online"
+        uptime:            d.uptimeInMillis != null ? Math.round(d.uptimeInMillis / 1000) : null,
+        firmware_version:  d.firmwareVersion    || null,
+        name:              d.deviceName         || null,
+        ip_address:        d.ipv4               || null,
+        public_ip_address: d.publicIp           || d.publicIpv4 || null,  // field is "publicIp" here
+        macaddr:           d.macAddress         || null,
+        model:             d.model              || null,
+        switch_type:       d.switchType         || null,   // "cx", "aos-s", etc.
+        health:            d.health             || null,   // "Good" / "Fair" / "Poor"
+        cpu_utilization:   tr.cpuUtilization    ?? null,
+        mem_pct:           tr.memoryUtilization ?? null,
+        poe_consumption:   tr.poeConsumption    != null ? Math.round(tr.poeConsumption * 10) / 10 : null,
+        total_poe:         tr.poeAvailable      ?? null,
+        temperature:       tr.systemTemperature != null ? Math.round(tr.systemTemperature * 10) / 10 : null,
+        uplink_ports:      tr.upLinkPorts       || [],
+        last_restart:      d.lastRestartReason  || null,
+        config_status:     d.configStatus       || null,
+      };
+    };
+
+    // Normalize internal cluster network-monitoring/v1 gateway response
+    const normalizeNetMonGateway = d => ({
+      _source:         'internal-gateway',
+      status:          d.status,                // "Online"
+      uptime:          d.uptimeInMillis != null ? Math.round(d.uptimeInMillis / 1000) : null,
+      firmware_version: d.firmwareVersion       || null,
+      name:            d.deviceName             || null,
+      ip_address:      d.ipAddress              || d.ipv4 || null,
+      macaddr:         d.macAddress             || null,
+      mac_range:       d.macRange               || null,
+      model:           d.model                  || null,
+      role:            d.role                   || null,    // "Isoleader", "Follower", etc.
+      device_function: d.deviceFunction         || null,    // "Mobility Gateway", "Branch Gateway"
+      mode:            d.mode                   || null,
+      cluster_name:    d.clusterName            || null,
+      site_name:       d.siteName               || null,
+      cpu_utilization: d.cpuUtilization         ?? null,
+      mem_pct:         d.memoryUtilization      ?? null,
+      last_restart:    d.rebootReason           || null,
+    });
+
+    try {
+      const type = (deviceType || '').toUpperCase();
+      let paths = [];
+      const s = encodeURIComponent(serial);
+      if (type === 'AP' || type === 'IAP') {
+        paths = [
+          `/network-monitoring/v1/aps/${s}`,         // internal/HPE cluster v1 (confirmed)
+          `/network-monitoring/v1alpha1/aps/${s}`,   // internal/HPE cluster v1alpha1 (fallback)
+          `/monitoring/v1/aps?serial=${s}`,           // standard cluster v1 query param
+          `/monitoring/v2/aps?serial=${s}`,
+          `/monitoring/v1/aps/${s}`,
+        ];
+      } else if (type === 'SWITCH') {
+        paths = [
+          `/network-monitoring/v1/switches/${s}`,
+          `/network-monitoring/v1alpha1/switches/${s}`,
+          `/monitoring/v1/switches?serial=${s}`,
+          `/monitoring/v2/switches?serial=${s}`,
+          `/monitoring/v1/switches/${s}`,
+        ];
+      } else if (type === 'GATEWAY') {
+        paths = [
+          `/network-monitoring/v1/gateways/${s}`,
+          `/network-monitoring/v1alpha1/gateways/${s}`,
+          `/monitoring/v1/gateways?serial=${s}`,
+          `/monitoring/v2/gateways?serial=${s}`,
+          `/monitoring/v1/gateways/${s}`,
+        ];
+      } else {
+        paths = [
+          `/network-monitoring/v1/aps/${s}`,
+          `/monitoring/v1/aps?serial=${s}`,
+          `/monitoring/v1/switches?serial=${s}`,
+          `/monitoring/v1/gateways?serial=${s}`,
+        ];
+      }
+      for (const path of paths) {
+        const url = `https://${centralUrl}${path}`;
+        const res = await proxyCall({ url, token: centralToken });
+        console.log(`[centralGetDeviceStats] ${path} → ${res.status}`);
+        if (!res.ok) continue;
+        const d = await res.json();
+        // Handle all known response shapes: array wrapper, data array, or bare object
+        let device = d.aps?.[0] || d.switches?.[0] || d.gateways?.[0]
+          || d.data?.[0]
+          || (d.serial || d.serialNumber || d.id ? d : null);
+        if (device) {
+          // Normalise internal cluster network-monitoring response to standard shape
+          if (path.includes('/network-monitoring/')) {
+            if (type === 'AP' || type === 'IAP')              device = normalizeNetMonAp(device);
+            else if (type === 'SWITCH')                        device = normalizeNetMonSwitch(device);
+            else if (type === 'GATEWAY' || type === 'GW')     device = normalizeNetMonGateway(device);
+          }
+          console.log('[centralGetDeviceStats] found via', path, '| status:', device.status);
+          return device;
+        }
+      }
+
+      // Last resort: NRM config endpoint (no live data, but model/IP/MAC)
+      try {
+        const nrmUrl = `https://${centralUrl}/network-config/v1alpha1/devices?serial=${s}`;
+        const nrmRes = await proxyCall({ url: nrmUrl, token: centralToken });
+        console.log(`[centralGetDeviceStats] NRM devices → ${nrmRes.status}`);
+        if (nrmRes.ok) {
+          const d = await nrmRes.json();
+          const items = d.items || d.devices || (Array.isArray(d) ? d : []);
+          const match = items.find(item =>
+            String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
+          );
+          if (match) {
+            console.log('[centralGetDeviceStats] NRM match full object:', JSON.stringify(match));
+            return {
+              _source:          'nrm',
+              serial:           match.scopeName || serial,
+              status:           match.status || match.connectionStatus || null,
+              firmware_version: match.firmware || match.firmwareVersion || null,
+              name:             match.hostname || match.deviceName || null,
+              ip_address:       match.ipv4 || match.ip || match.ipAddress || null,
+              model:            match.model || match.deviceModel || null,
+              siteName:         match.siteName || null,
+              deployment:       match.deployment || null,
+              mac:              match.mac || null,
+            };
+          }
+        }
+      } catch (nrmErr) {
+        console.warn('[centralGetDeviceStats] NRM fallback failed:', nrmErr.message);
+      }
+
+      console.warn('[centralGetDeviceStats] no data found for serial', serial);
+      return null;
+    } catch (e) {
+      console.warn('[centralGetDeviceStats] failed:', e.message);
+      return null;
+    }
+  },
+
   async centralSetHostname({ serial, hostname, hostnameExists, scopeId, persona, deviceType, centralToken, centralUrl }) {
     const errors = [];
 
@@ -1064,24 +1281,38 @@ const liveApi = {
     const resolvedPersona = persona || 'CAMPUS_AP';
     const baseUrl = `https://${centralUrl}/network-config/v1alpha1/system-info` +
       `?scope-id=${encodeURIComponent(scopeId)}&persona=${resolvedPersona}&object_type=LOCAL`;
-    const body = { hostname };
 
-    console.log(`[centralSetHostname] scope_id=${scopeId} persona=${resolvedPersona} hostnameExists=${hostnameExists}`);
+    // New Central (internal cluster) uses a YANG model where hostname is nested inside
+    // a 'profile' container. Profile name is persona-dependent.
+    // Standard Central uses a flat { hostname } body.
+    // Try profile-wrapped first, then flat as fallback.
+    const profileName = resolvedPersona.includes('SWITCH') ? 'sys-system-info-profile' : 'default_sys_info';
+    const bodies = [
+      { profile: [{ name: profileName, hostname }] },  // New Central / internal cluster
+      { hostname },                                      // Standard Central fallback
+    ];
 
-    // When no hostname is set, we must POST to create the record.
-    // When one exists, PATCH updates it.
-    // We always try both in case hostnameExists was detected incorrectly.
+    // When no hostname is set, POST to create; when one exists, PATCH to update.
+    // Always try both in case hostnameExists was detected incorrectly.
     const methods = hostnameExists ? ['PATCH', 'POST'] : ['POST', 'PATCH'];
 
-    for (const method of methods) {
-      try {
-        console.log(`[centralSetHostname] ${method} ${baseUrl}`);
-        const res = await proxyCall({ url: baseUrl, method, token: centralToken, body });
-        const txt = !res.ok ? await res.clone().text() : '';
-        console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
-        if (res.ok) return res.json().catch(() => ({ success: true }));
-        errors.push(`${method} → ${res.status}: ${txt.slice(0, 200)}`);
-      } catch (e) { errors.push(`${method} → ${e.message}`); }
+    console.log(`[centralSetHostname] scope_id=${scopeId} persona=${resolvedPersona} profileName=${profileName} hostnameExists=${hostnameExists}`);
+
+    for (const body of bodies) {
+      for (const method of methods) {
+        try {
+          console.log(`[centralSetHostname] ${method} ${baseUrl}`, JSON.stringify(body));
+          const res = await proxyCall({ url: baseUrl, method, token: centralToken, body });
+          const txt = !res.ok ? await res.clone().text() : '';
+          console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
+          if (res.ok) return res.json().catch(() => ({ success: true }));
+          errors.push(`${method}+${Object.keys(body)[0]} → ${res.status}: ${txt.slice(0, 200)}`);
+        } catch (e) { errors.push(`${method} → ${e.message}`); }
+      }
+      // If the first body format succeeded for any method we'd have returned already.
+      // If all methods failed for this body format with "not found as child", move on.
+      const allNotFound = errors.every(e => e.includes('not found'));
+      if (!allNotFound) break; // Non-schema error — don't try more body formats
     }
 
     throw new Error(`Hostname update failed.\n${errors.join('\n')}`);
@@ -1181,6 +1412,19 @@ const demoApi = {
     return { _scopeId: '73891316876853001' };
   },
   async centralSetHostname()   { await delay(500); return { success: true }; },
+  async centralGetDeviceStats({ serial } = {}) {
+    await delay(700);
+    if (!(serial || '').toUpperCase().startsWith('EXIST')) return null;
+    return {
+      status: 'Up', uptime: 1234567, firmware_version: '10.6.0.0-beta',
+      client_count: 23, ip_address: '10.1.2.45',
+      name: 'AP-LDN-HQ-001',
+      radios: [
+        { band: '2.4GHz', channel: 6,   tx_power: 18, utilization: 12, noise_floor: -95 },
+        { band: '5GHz',   channel: 100,  tx_power: 15, utilization: 42, noise_floor: -92 },
+      ],
+    };
+  },
 };
 
 // ── BARCODE PARSER ─────────────────────────────────────────────────────────────
@@ -2512,6 +2756,604 @@ const FunctionScreen = ({ onSelect, onSkip, deviceType, initialId }) => {
   );
 };
 
+// ── SCREEN: DEVICE FOUND (existing device choice) ────────────────────────────
+const DeviceFoundScreen = ({ summary, settings, api, onViewStatus, onProvision, onBack }) => {
+  const typeEmoji = summary.deviceType === 'AP' ? '📡' : summary.deviceType === 'SWITCH' ? '🔀' : summary.deviceType === 'GATEWAY' ? '🌐' : '📦';
+
+  const [subDisplay,    setSubDisplay]    = useState(null);
+  const [appName,       setAppName]       = useState(null);
+  const [siteName,      setSiteName]      = useState(null);
+  const [locationName,  setLocationName]  = useState(null);
+
+  useEffect(() => {
+    if (!settings || !api) return;
+    const token       = settings.token;
+    const centralUrl  = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
+    const centralToken = settings.centralToken || settings.token;
+
+    // Subscription tier — fetch single subscription by ID (lightest call)
+    const subPromise = summary.currentSubscriptionId
+      ? proxyCall({ url: `${GL_BASE}/subscriptions/v1/subscriptions/${summary.currentSubscriptionId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => {
+            if (!d) return null;
+            const raw = d.tier || d.subscription_tier_description || d.skuDescription || d.product_description || d.name || null;
+            if (!raw) return null;
+            // Normalise ALL-CAPS to Title Case ("FOUNDATION" → "Foundation")
+            return raw === raw.toUpperCase() ? raw.split(/[_\s]+/).map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(' ') : raw;
+          })
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    // Application name — fetch service manager by ID
+    const appPromise = summary.currentApplicationId
+      ? proxyCall({ url: `${GL_BASE}/service-catalog/v1beta1/service-managers/${summary.currentApplicationId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => d?.name || null)
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    // Site name — resolve numeric ID against Central sites list
+    const sitePromise = summary.currentSiteId
+      ? api.centralGetSites({ centralToken, centralUrl, token }).catch(() => [])
+          .then(sites => sites.find(s => String(s.id) === String(summary.currentSiteId))?.name || null)
+      : Promise.resolve(null);
+
+    // Location name — fetch single location by ID
+    const locPromise = summary.currentLocationId
+      ? proxyCall({ url: `${GL_BASE}/locations/v1/locations/${summary.currentLocationId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => d?.name || null)
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    Promise.all([subPromise, appPromise, sitePromise, locPromise]).then(([sub, app, site, loc]) => {
+      if (sub)  setSubDisplay(sub);
+      if (app)  setAppName(app);
+      if (site) setSiteName(site);
+      if (loc)  setLocationName(loc);
+    });
+  }, []);
+
+  const fnLabel = summary.currentFunctionId
+    ? (DEVICE_FUNCTIONS.find(f => f.id === summary.currentFunctionId)?.label || summary.currentFunctionId)
+    : null;
+
+  const rows = [
+    summary.currentSubscriptionKey && { label: 'Subscription', value: subDisplay || '…' },
+    fnLabel                        && { label: 'Function',     value: fnLabel },
+    summary.currentSiteId          && { label: 'Site',         value: siteName      || '…' },
+    summary.currentApplicationId   && { label: 'Application',  value: appName       || '…' },
+    summary.currentLocationId      && { label: 'Location',     value: locationName  || '…' },
+  ].filter(Boolean);
+
+  return (
+    <div className="p-5 step-enter flex flex-col" style={{ minHeight: 'calc(100dvh - 120px)' }}>
+      <div className="pt-2 mb-5">
+        <h2 className="text-white font-bold text-xl">Device Found</h2>
+        <p className="text-gray-400 text-sm font-mono mt-0.5">{summary.serial}</p>
+      </div>
+
+      {/* Device summary card */}
+      <div className="rounded-2xl p-4 mb-4" style={{ background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)' }}>
+        <div className="flex items-center gap-3 mb-3">
+          <span className="text-2xl">{typeEmoji}</span>
+          <div className="flex-1 min-w-0">
+            <p className="text-white font-bold truncate">{summary.deviceModel || summary.deviceType || 'Device'}</p>
+            {summary.devicePartNumber && <p className="text-gray-500 text-xs">{summary.devicePartNumber}</p>}
+          </div>
+          <span className="text-xs px-2.5 py-1 rounded-full font-semibold whitespace-nowrap bg-blue-500 bg-opacity-20 text-blue-400">Already in GL</span>
+        </div>
+        {rows.length > 0 && (
+          <div className="grid grid-cols-2 gap-2">
+            {rows.map(r => (
+              <div key={r.label} className="rounded-lg px-3 py-2" style={{ background: 'rgba(255,255,255,0.04)' }}>
+                <p className="text-gray-500 text-xs mb-0.5">{r.label}</p>
+                <p className="text-gray-300 text-xs font-medium truncate">{r.value}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <p className="text-gray-500 text-xs text-center mb-4">This device is already registered in GreenLake. What would you like to do?</p>
+
+      <div className="space-y-3">
+        <button onClick={onViewStatus}
+          className="w-full rounded-2xl p-4 text-left active:scale-95 transition-transform"
+          style={{ background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.3)' }}>
+          <div className="flex items-center gap-3">
+            <span className="text-xl">📋</span>
+            <div className="flex-1">
+              <p className="text-indigo-300 font-semibold text-sm">View Device Status</p>
+              <p className="text-indigo-400 text-xs mt-0.5" style={{ opacity: 0.75 }}>Live stats, connectivity &amp; assignments</p>
+            </div>
+            <span className="text-indigo-400 text-xl">›</span>
+          </div>
+        </button>
+
+        <button onClick={onProvision}
+          className="w-full rounded-2xl p-4 text-left active:scale-95 transition-transform"
+          style={{ background: 'rgba(16,185,129,0.08)', border: '1px solid rgba(16,185,129,0.25)' }}>
+          <div className="flex items-center gap-3">
+            <span className="text-xl">⚙️</span>
+            <div className="flex-1">
+              <p className="text-emerald-300 font-semibold text-sm">Update / Provision</p>
+              <p className="text-emerald-400 text-xs mt-0.5" style={{ opacity: 0.75 }}>Change subscription, site, or other settings</p>
+            </div>
+            <span className="text-emerald-400 text-xl">›</span>
+          </div>
+        </button>
+      </div>
+
+      <button onClick={onBack} className="mt-auto pt-8 text-gray-600 text-xs text-center w-full">
+        ← Scan another device
+      </button>
+    </div>
+  );
+};
+
+// ── SCREEN: DEVICE STATUS ─────────────────────────────────────────────────────
+const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => {
+  const [stats, setStats]               = useState(null);
+  const [loading, setLoading]           = useState(true);
+  const [siteName, setSiteName]         = useState(null);
+  const [subDisplay, setSubDisplay]     = useState(null);
+  const [locationName, setLocationName] = useState(null);
+
+  useEffect(() => {
+    const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
+    const centralToken = settings.centralToken || settings.token;
+    const token = settings.token;
+
+    const statsPromise = api.centralGetDeviceStats({
+      serial: summary.serial,
+      deviceType: summary.deviceType,
+      centralToken,
+      centralUrl,
+    }).catch(e => { console.warn('[DeviceStatusScreen] stats error:', e.message); return null; });
+
+    const sitesPromise = summary.currentSiteId
+      ? api.centralGetSites({ centralToken, centralUrl, token }).catch(() => [])
+      : Promise.resolve([]);
+
+    const subPromise = summary.currentSubscriptionId
+      ? proxyCall({ url: `${GL_BASE}/subscriptions/v1/subscriptions/${summary.currentSubscriptionId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => {
+            if (!d) return null;
+            const raw = d.tier || d.subscription_tier_description || d.skuDescription || d.product_description || d.name || null;
+            if (!raw) return null;
+            return raw === raw.toUpperCase() ? raw.split(/[_\s]+/).map(w => w.charAt(0) + w.slice(1).toLowerCase()).join(' ') : raw;
+          })
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    const locPromise = summary.currentLocationId
+      ? proxyCall({ url: `${GL_BASE}/locations/v1/locations/${summary.currentLocationId}`, token })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => d?.name || null)
+          .catch(() => null)
+      : Promise.resolve(null);
+
+    Promise.all([statsPromise, sitesPromise, subPromise, locPromise]).then(([d, sites, sub, loc]) => {
+      setStats(d);
+      let resolvedSite = null;
+      if (summary.currentSiteId && sites?.length) {
+        const match = sites.find(s => String(s.id) === String(summary.currentSiteId));
+        if (match) resolvedSite = match.name;
+      }
+      if (!resolvedSite && d?.siteName) resolvedSite = d.siteName;
+      if (resolvedSite) setSiteName(resolvedSite);
+      if (sub) setSubDisplay(sub);
+      if (loc) setLocationName(loc);
+      setLoading(false);
+    });
+  }, []);
+
+  // ── Shared helpers ────────────────────────────────────────────────────────────
+  const isUp       = ['up', 'online'].includes((stats?.status || '').toLowerCase());
+  const typeEmoji  = summary.deviceType === 'AP' ? '📡' : summary.deviceType === 'SWITCH' ? '🔀' : summary.deviceType === 'GATEWAY' ? '🌐' : '📦';
+  const isNrm      = stats?._source === 'nrm';
+
+  const fmtUptime = secs => {
+    if (!secs) return '—';
+    const d = Math.floor(secs / 86400), h = Math.floor((secs % 86400) / 3600), m = Math.floor((secs % 3600) / 60);
+    return [d && `${d}d`, h && `${h}h`, m && `${m}m`].filter(Boolean).join(' ') || '<1m';
+  };
+  const fmtLastSeen = ts => {
+    if (!ts) return null;
+    // ts may be seconds or milliseconds
+    const ms = ts > 1e12 ? ts : ts * 1000;
+    const d  = new Date(ms);
+    return d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+  const fmtMem = (total, free, pct) => {
+    if (pct  != null) return `${pct}% used`;
+    if (!total) return null;
+    const used    = total - (free || 0);
+    const usedPct = Math.round((used / total) * 100);
+    const mb      = v => `${Math.round(v / 1024)} MB`;
+    return `${mb(used)} / ${mb(total)} (${usedPct}%)`;
+  };
+  const fmtRate = bps => {
+    if (bps == null) return '—';
+    if (bps >= 1e9)  return `${(bps / 1e9).toFixed(1)} Gbps`;
+    if (bps >= 1e6)  return `${(bps / 1e6).toFixed(1)} Mbps`;
+    if (bps >= 1e3)  return `${(bps / 1e3).toFixed(0)} Kbps`;
+    return `${bps} bps`;
+  };
+
+  // ── Shared status header card ─────────────────────────────────────────────────
+  const StatusCard = ({ extra = [] }) => {
+    const borderColor = isUp ? 'rgba(16,185,129,0.2)' : 'rgba(239,68,68,0.2)';
+    const bgColor     = isUp ? 'rgba(16,185,129,0.07)' : 'rgba(239,68,68,0.05)';
+    const dotColor    = isUp ? 'bg-emerald-400' : 'bg-red-500';
+    const dotGlow     = isUp ? '0 0 6px #10b981' : '0 0 6px #ef4444';
+    return (
+      <div className="rounded-2xl p-4" style={{ background: bgColor, border: `1px solid ${borderColor}` }}>
+        <div className="flex items-center gap-2 mb-3">
+          <span className={`w-2.5 h-2.5 rounded-full ${dotColor} shrink-0`} style={{ boxShadow: dotGlow }} />
+          <p className="text-white text-xs font-bold uppercase tracking-widest">{isUp ? 'Online' : 'Offline'}</p>
+        </div>
+        <div className="grid grid-cols-2 gap-3 text-xs">
+          {!isUp && stats?.last_modified && (
+            <div className="col-span-2">
+              <p className="text-gray-500 mb-0.5">Last Seen</p>
+              <p className="text-gray-300 font-medium">{fmtLastSeen(stats.last_modified)}</p>
+            </div>
+          )}
+          {extra.filter(r => r.value != null && r.value !== '').map(r => (
+            <div key={r.label} className={r.wide ? 'col-span-2' : ''}>
+              <p className="text-gray-500 mb-0.5">{r.label}</p>
+              <p className={`font-medium truncate ${r.color || 'text-white'}`}>{r.value}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
+  // ── AP-specific sections ──────────────────────────────────────────────────────
+  const ApSections = () => {
+    // Negotiated power: "802.3at" is a standard name — show as-is; watts values append W
+    const poeFmt = (() => {
+      const np = stats.negotiated_power;
+      const pc = stats.poe_consumption;
+      if (np)             return np;             // "802.3at", "802.3bt", etc.
+      if (pc != null)     return `${pc} W`;
+      return null;
+    })();
+
+    return (<>
+      <StatusCard extra={[
+        { label: 'Uptime',           value: fmtUptime(stats.uptime) },
+        { label: 'Firmware',         value: stats.firmware_version, wide: true },
+        { label: 'Negotiated Power', value: poeFmt },
+        { label: 'Clients',          value: stats.client_count != null ? String(stats.client_count) : null },
+        { label: 'CPU',              value: stats.cpu_utilization != null ? `${stats.cpu_utilization}%` : null },
+        { label: 'Memory',           value: fmtMem(stats.mem_total, stats.mem_free, stats.mem_pct) },
+      ]} />
+
+      {/* Network */}
+      {(stats.ip_address || stats.public_ip_address || stats.gateway_ip || stats.macaddr) && (
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🌐 Network</p>
+          <div className="space-y-2.5 text-xs">
+            {[
+              { label: 'IP Address',   value: stats.ip_address },
+              { label: 'Subnet Mask',  value: stats.subnet_mask },
+              { label: 'Gateway',      value: stats.gateway_ip },
+              { label: 'Public IP',    value: stats.public_ip_address },
+              { label: 'MAC Address',  value: stats.macaddr || stats.mac },
+            ].filter(r => r.value).map(r => (
+              <div key={r.label} className="flex justify-between items-center">
+                <span className="text-gray-500">{r.label}</span>
+                <span className="text-gray-300 font-mono font-medium text-right max-w-[60%] truncate">{r.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* RF per-radio */}
+      {stats.radios?.length > 0 && (
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">📡 Radio</p>
+          <div className="space-y-4">
+            {stats.radios.map((r, i) => {
+              const band = r.band || r.radio_name || `Radio ${i + 1}`;
+              const chanLabel = [r.channel, r.bandwidth].filter(Boolean).join(' / ');
+              return (
+                <div key={i}>
+                  <p className="text-gray-300 text-xs font-semibold mb-2 pb-1.5" style={{ borderBottom: '1px solid rgba(255,255,255,0.06)' }}>
+                    {band}
+                    {r.client_count != null && <span className="text-gray-500 font-normal ml-2">· {r.client_count} client{r.client_count !== 1 ? 's' : ''}</span>}
+                    {r.status && r.status.toLowerCase() !== 'up' && <span className="text-red-400 font-normal ml-2">({r.status})</span>}
+                  </p>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div><p className="text-gray-500 mb-0.5">Channel / BW</p><p className="text-white font-medium">{chanLabel || '—'}</p></div>
+                    <div><p className="text-gray-500 mb-0.5">Tx Power</p><p className="text-white font-medium">{r.tx_power != null ? `${r.tx_power} dBm` : '—'}</p></div>
+                    <div>
+                      <p className="text-gray-500 mb-0.5">Utilization</p>
+                      <p className={`font-medium ${r.utilization > 70 ? 'text-red-400' : r.utilization > 40 ? 'text-yellow-400' : 'text-emerald-400'}`}>
+                        {r.utilization != null ? `${r.utilization}%` : '—'}
+                      </p>
+                    </div>
+                    <div><p className="text-gray-500 mb-0.5">Noise Floor</p><p className="text-white font-medium">{r.noise_floor != null ? `${r.noise_floor} dBm` : '—'}</p></div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </>);
+  };
+
+  // ── Switch-specific sections ──────────────────────────────────────────────────
+  const SwitchSections = () => {
+    const uplinkTotal = (() => {
+      const ports = stats.uplink_ports || stats.ports?.filter(p => p.is_uplink) || [];
+      if (!ports.length) return null;
+      const inSum  = ports.reduce((s, p) => s + (p.in_traffic  || p.in_rate  || 0), 0);
+      const outSum = ports.reduce((s, p) => s + (p.out_traffic || p.out_rate || 0), 0);
+      return { in: inSum, out: outSum, count: ports.length };
+    })();
+
+    const healthRaw   = stats.health_score ?? stats.health ?? null;
+    const healthColor = healthRaw == null ? 'text-white'
+      : typeof healthRaw === 'number'
+        ? (healthRaw >= 80 ? 'text-emerald-400' : healthRaw >= 50 ? 'text-yellow-400' : 'text-red-400')
+        : ({ good: 'text-emerald-400', fair: 'text-yellow-400', poor: 'text-red-400' }[String(healthRaw).toLowerCase()] || 'text-white');
+    const healthDisplay = healthRaw == null ? null
+      : typeof healthRaw === 'number' ? `${healthRaw}/100` : String(healthRaw);
+
+    return (<>
+      <StatusCard extra={[
+        { label: 'Uptime',       value: fmtUptime(stats.uptime) },
+        { label: 'Device Name',  value: stats.name },
+        { label: 'Model',        value: stats.model || summary.deviceModel },
+        { label: 'Switch Type',  value: stats.switch_type ? stats.switch_type.toUpperCase() : null },
+        { label: 'Health',       value: healthDisplay, color: healthColor },
+        { label: 'Firmware',     value: stats.firmware_version, wide: true },
+      ]} />
+
+      {/* Network */}
+      {(stats.ip_address || stats.public_ip_address) && (
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🌐 Network</p>
+          <div className="space-y-2.5 text-xs">
+            {[
+              { label: 'IPv4 Address', value: stats.ip_address },
+              { label: 'Public IP',    value: stats.public_ip_address },
+            ].filter(r => r.value).map(r => (
+              <div key={r.label} className="flex justify-between items-center">
+                <span className="text-gray-500">{r.label}</span>
+                <span className="text-gray-300 font-mono font-medium text-right max-w-[60%] truncate">{r.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Resources */}
+      <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">⚙️ Resources</p>
+        <div className="space-y-2.5 text-xs">
+          {[
+            { label: 'CPU',           value: stats.cpu_utilization != null ? `${stats.cpu_utilization}%` : null },
+            { label: 'Memory',        value: fmtMem(stats.mem_total, stats.mem_free, stats.mem_pct) },
+            { label: 'PoE Consumed',  value: stats.poe_consumption  != null ? `${stats.poe_consumption} W` : null },
+            { label: 'PoE Available', value: (stats.total_poe ?? stats.poe_budget) != null ? `${stats.total_poe ?? stats.poe_budget} W` : null },
+            { label: 'Temperature',   value: stats.temperature != null ? `${stats.temperature} °C` : null },
+          ].filter(r => r.value).map(r => (
+            <div key={r.label} className="flex justify-between items-center">
+              <span className="text-gray-500">{r.label}</span>
+              <span className="text-gray-300 font-medium text-right">{r.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Uplinks */}
+      {uplinkTotal && (
+        <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+          <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🔗 Uplinks <span className="font-normal normal-case text-gray-600">({uplinkTotal.count} port{uplinkTotal.count !== 1 ? 's' : ''})</span></p>
+          <div className="space-y-2.5 text-xs">
+            {[
+              { label: 'In',  value: fmtRate(uplinkTotal.in)  },
+              { label: 'Out', value: fmtRate(uplinkTotal.out) },
+            ].map(r => (
+              <div key={r.label} className="flex justify-between items-center">
+                <span className="text-gray-500">{r.label}</span>
+                <span className="text-gray-300 font-medium">{r.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </>);
+  };
+
+  // ── Gateway-specific sections ─────────────────────────────────────────────────
+  const GatewaySections = () => (<>
+    <StatusCard extra={[
+      { label: 'Uptime',    value: fmtUptime(stats.uptime) },
+      { label: 'Model',     value: stats.model || summary.deviceModel },
+      { label: 'Role',      value: stats.role },
+      { label: 'Function',  value: stats.device_function || stats.mode || null },
+      { label: 'Firmware',  value: stats.firmware_version, wide: true },
+      { label: 'Cluster',   value: stats.cluster_name, wide: true },
+    ]} />
+
+    <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+      <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">🌐 Network</p>
+      <div className="space-y-2.5 text-xs">
+        {[
+          { label: 'IP Address',  value: stats.ip_address },
+          { label: 'MAC Address', value: stats.macaddr || stats.mac },
+          { label: 'MAC Range',   value: stats.mac_range },
+          { label: 'Device Name', value: stats.name },
+        ].filter(r => r.value).map(r => (
+          <div key={r.label} className="flex justify-between items-center">
+            <span className="text-gray-500">{r.label}</span>
+            <span className="text-gray-300 font-mono font-medium text-right max-w-[60%] truncate">{r.value}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    {(stats.cpu_utilization != null || stats.mem_pct != null) && (
+      <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">⚙️ Resources</p>
+        <div className="space-y-2.5 text-xs">
+          {[
+            { label: 'CPU',    value: stats.cpu_utilization != null ? `${stats.cpu_utilization}%` : null },
+            { label: 'Memory', value: fmtMem(stats.mem_total, stats.mem_free, stats.mem_pct) },
+          ].filter(r => r.value).map(r => (
+            <div key={r.label} className="flex justify-between items-center">
+              <span className="text-gray-500">{r.label}</span>
+              <span className="text-gray-300 font-medium">{r.value}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    )}
+
+    {stats.last_restart && (
+      <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+        <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-2">🔄 Last Reboot</p>
+        <p className="text-gray-300 text-xs font-mono">{stats.last_restart}</p>
+      </div>
+    )}
+  </>);
+
+  // ── NRM fallback (internal cluster — config data only) ────────────────────────
+  const NrmSection = () => (
+    <div className="rounded-2xl p-4" style={{ background: 'rgba(99,102,241,0.07)', border: '1px solid rgba(99,102,241,0.25)' }}>
+      <div className="flex items-center justify-between mb-3">
+        <p className="text-indigo-400 text-xs font-bold uppercase tracking-widest">📦 Device Info</p>
+        <span className="text-gray-600 text-xs">config data — live monitoring unavailable</span>
+      </div>
+      <div className="grid grid-cols-2 gap-3 text-xs">
+        {[
+          { label: 'Model',       value: stats.model || summary.deviceModel },
+          { label: 'Deployment',  value: stats.deployment },
+          { label: 'IP Address',  value: stats.ip_address,       wide: true },
+          { label: 'MAC Address', value: stats.macaddr || stats.mac, wide: true },
+        ].filter(r => r.value).map(r => (
+          <div key={r.label} className={r.wide ? 'col-span-2' : ''}>
+            <p className="text-gray-500 mb-0.5">{r.label}</p>
+            <p className="text-white font-medium font-mono truncate">{r.value}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col" style={{ height: 'calc(100dvh - 120px)' }}>
+      {/* Header */}
+      <div className="px-5 pt-4 pb-3 flex items-center gap-3 shrink-0" style={{ borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+        <button onClick={onBack} className="text-gray-400 text-sm py-1 pr-2">‹ Back</button>
+        <div className="flex-1 min-w-0">
+          <p className="text-white font-bold">{typeEmoji} {summary.deviceModel || 'Device Status'}</p>
+          <p className="text-gray-500 text-xs font-mono truncate">{summary.serial}</p>
+        </div>
+        {stats && !isNrm && (
+          <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${isUp ? 'bg-emerald-400' : 'bg-red-500'}`}
+            style={{ boxShadow: isUp ? '0 0 6px #10b981' : '0 0 6px #ef4444' }} />
+        )}
+      </div>
+
+      {/* Scrollable content */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4 min-h-0">
+
+        {loading ? (
+          <div className="flex flex-col items-center py-8 gap-3">
+            <Spinner size={32} />
+            <p className="text-gray-500 text-sm">Fetching live data…</p>
+          </div>
+        ) : (<>
+
+          {/* Device-type-specific stat sections */}
+          {!stats ? (
+            <div className="rounded-2xl p-4 text-center" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <p className="text-gray-500 text-sm">Live stats unavailable</p>
+              <p className="text-gray-600 text-xs mt-1">Monitoring API not responding — check your Central cluster setting</p>
+            </div>
+          ) : isNrm ? (
+            <NrmSection />
+          ) : summary.deviceType === 'AP' ? (
+            <ApSections />
+          ) : summary.deviceType === 'SWITCH' ? (
+            <SwitchSections />
+          ) : summary.deviceType === 'GATEWAY' ? (
+            <GatewaySections />
+          ) : (
+            /* Unknown type — generic status + all fields */
+            <StatusCard extra={[
+              { label: 'Uptime',   value: fmtUptime(stats.uptime) },
+              { label: 'Firmware', value: stats.firmware_version },
+              { label: 'IP',       value: stats.ip_address },
+            ]} />
+          )}
+
+          {/* GreenLake Assignments */}
+          {(summary.currentSubscriptionKey || summary.currentApplicationId || summary.currentLocationId) && (
+            <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">GreenLake Assignments</p>
+              <div className="space-y-2.5 text-xs">
+                {[
+                  { label: 'Subscription', value: subDisplay || (summary.currentSubscriptionKey ? '…' : null) },
+                  { label: 'Application',  value: summary.currentApplicationId ? 'Assigned' : null },
+                  { label: 'Location',     value: locationName || (summary.currentLocationId ? '…' : null) },
+                  summary.currentFunctionId && { label: 'Function', value: DEVICE_FUNCTIONS.find(f => f.id === summary.currentFunctionId)?.label || summary.currentFunctionId },
+                ].filter(r => r && r.value).map(r => (
+                  <div key={r.label} className="flex justify-between items-center">
+                    <span className="text-gray-500">{r.label}</span>
+                    <span className="text-gray-300 font-medium font-mono text-right max-w-[55%] truncate">{r.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Aruba Central */}
+          {(siteName || summary.currentSiteId || summary.currentFunctionId || stats?.name) && (
+            <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}>
+              <p className="text-gray-400 text-xs font-bold uppercase tracking-widest mb-3">Aruba Central</p>
+              <div className="space-y-2.5 text-xs">
+                {[
+                  { label: 'Site',     value: siteName || (summary.currentSiteId ? '…' : null) },
+                  { label: 'Function', value: summary.currentFunctionId },
+                  { label: 'Hostname', value: stats?.name || null },
+                ].filter(r => r.value).map(r => (
+                  <div key={r.label} className="flex justify-between items-center">
+                    <span className="text-gray-500">{r.label}</span>
+                    <span className="text-gray-300 font-medium font-mono text-right max-w-[55%] truncate">{r.value}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+        </>)}
+      </div>
+
+      {/* Update button */}
+      <div className="px-5 py-3 shrink-0" style={{ borderTop: '1px solid rgba(255,255,255,0.07)' }}>
+        <button onClick={onProvision}
+          className="w-full py-3.5 rounded-2xl text-sm font-semibold transition-all active:scale-95"
+          style={{ background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.3)', color: '#6ee7b7' }}>
+          ⚙️ Update this device →
+        </button>
+      </div>
+    </div>
+  );
+};
+
 // ── SCREEN: REVIEW ────────────────────────────────────────────────────────────
 // ── SCREEN: HOSTNAME (optional) ───────────────────────────────────────────────
 const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) => {
@@ -2898,6 +3740,7 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
         deviceModel: glData.model || glData.deviceModel || null,
         partNumber: glData.partNumber || null,
         currentSubscriptionKey: glData._subKey || null,
+        currentSubscriptionId:  glData._subId  || null,
         currentApplicationId: glData.application?.id || null,
         currentLocationId: glData.location?.id || null,
         currentContactId: glData.contact?.workspaceUser?.id || glData.contact?.id || null,
@@ -3611,7 +4454,7 @@ const BatchSuccessScreen = ({ queue, onAnother }) => {
 // ── APP ────────────────────────────────────────────────────────────────────────
 const STEPS = ['scan','tags','location','contact','adding_gl','device_type','subscription','application','site','function','review'];
 // device_type is a fallback screen — give it the same progress value as subscription so the bar doesn't jump.
-const STEP_PROGRESS = { scan:0, tags:1, location:2, contact:3, adding_gl:4, device_type:5, subscription:5, application:6, site:7, function:8, hostname:9, review:10 };
+const STEP_PROGRESS = { scan:0, lookup:0, tags:1, location:2, contact:3, adding_gl:4, device_found:0, device_status:0, device_type:5, subscription:5, application:6, site:7, function:8, hostname:9, review:10 };
 const TOTAL_STEPS = 10;
 
 const defaultSettings = () => ({
@@ -3714,17 +4557,20 @@ const App = () => {
 
   const isBatch = screen.startsWith('batch_');
   // Don't show progress bar on batch-mode scan home screen — it's the entry point, not step 1
-  const showProgress = !isBatch && !(settings.batchMode && screen === 'scan') && !['settings','success','boot'].includes(screen);
+  const showProgress = !isBatch && !(settings.batchMode && screen === 'scan') && !['settings','success','boot','lookup','device_found','device_status'].includes(screen);
   const currentStep = STEP_PROGRESS[screen] ?? 0;
   const backTarget = isBatch ? null : ({
-    tags:        'scan',
-    location:    'tags',
-    contact:     'location',
-    application: 'subscription',
-    site:        'application',
-    function:    'site',
-    review:      summary.deviceType === 'UXI' ? 'application' : 'function',
-    settings:    'scan',
+    lookup:        'scan',
+    device_found:  'scan',
+    tags:          summary.foundExisting ? 'device_found' : 'scan',
+    location:      'tags',
+    contact:       'location',
+    device_status: 'device_found',
+    application:   'subscription',
+    site:          'application',
+    function:      'site',
+    review:        summary.deviceType === 'UXI' ? 'application' : 'function',
+    settings:      'scan',
   }[screen] ?? null);
 
   // Batch back navigation — some are dynamic (group cycling), handled in components
@@ -3855,46 +4701,51 @@ const App = () => {
             )}
             <ScanScreen settings={liveSettings}
               onScanned={(d, raw) => {
-                upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null, currentSiteId: null, currentFunctionId: null });
-                // Background lookups — fetch a fresh token first so lookups don't fail
-                // if liveSettings.token is stale at the moment the scan fires.
+                upd({ ...d, rawBarcode: raw, currentTags: {}, currentContactId: null, currentLocationId: null, currentSubscriptionKey: null, currentApplicationId: null, currentSiteId: null, currentFunctionId: null, foundExisting: false, skipDeviceFound: false });
+                // Fire Central background lookup while LookupScreen handles the GL check
                 getGlToken()
                   .then(token => {
                     const centralUrl = CLUSTERS.find(c => c.id === liveSettings.centralCluster)?.url || CLUSTERS[0].url;
-                    // Fire GL and Central lookups in parallel
-                    return Promise.all([
-                      api.glLookupDevice({ serial: d.serial, ...liveSettings, token }),
-                      api.centralGetDeviceSiteId({ serial: d.serial, centralToken: token, centralUrl }),
-                    ]);
+                    return api.centralGetDeviceSiteId({ serial: d.serial, centralToken: token, centralUrl });
                   })
-                  .then(([existing, centralInfo]) => {
-                    const { siteId, persona } = centralInfo || {};
-                    console.log('[background lookup] existing:', !!existing, '| siteId:', siteId, '| persona:', persona);
-                    if (existing) {
-                      const patch = {
-                        currentTags:            existing.tags || {},
-                        // contact.workspaceUser.id for WORKSPACE-USER type; contact.id as fallback
-                        currentContactId:       existing.contact?.workspaceUser?.id || existing.contact?.id || null,
-                        currentLocationId:      existing.location?.id || null,
-                        // subscription is an array in the API response — use the normalised _subKey
-                        currentSubscriptionKey: existing._subKey || null,
-                        currentApplicationId:   existing.application?.id  || null,
-                      };
-                      console.log('[background lookup] upd patch:', JSON.stringify(patch));
-                      upd(patch);
-                    }
-                    // Persona 'None' means no function is configured — treat as null
+                  .then(({ siteId, persona } = {}) => {
                     const fnId = (persona && persona !== 'None') ? persona : null;
                     if (siteId || fnId) upd({
                       ...(siteId ? { currentSiteId:     siteId } : {}),
                       ...(fnId   ? { currentFunctionId: fnId   } : {}),
                     });
                   })
-                  .catch(e => console.warn('[background lookup] failed:', e.message));
-                enterScreen('tags');
+                  .catch(e => console.warn('[central background lookup] failed:', e.message));
+                enterScreen('lookup');
               }}
               onOpenSettings={() => setScreen('settings')} />
           </>
+        )}
+
+        {screen === 'lookup' && (
+          <LookupScreen serial={summary.serial} settings={liveSettings} api={api}
+            onDone={existing => {
+              if (existing) {
+                const glType = (existing.deviceType || '').toUpperCase();
+                const mapped = GL_DEVICE_TYPE_MAP[glType] || null;
+                upd({
+                  deviceId:              existing.id,
+                  deviceType:            mapped || summary.deviceType,
+                  deviceModel:           existing.model || existing.deviceModel || null,
+                  devicePartNumber:      existing.partNumber || null,
+                  foundExisting:         true,
+                  currentTags:           existing.tags || {},
+                  currentContactId:      existing.contact?.workspaceUser?.id || existing.contact?.id || null,
+                  currentLocationId:     existing.location?.id || null,
+                  currentSubscriptionKey: existing._subKey || null,
+                  currentSubscriptionId:  existing._subId  || null,
+                  currentApplicationId:  existing.application?.id || null,
+                });
+                setScreen('device_found');
+              } else {
+                enterScreen('tags');
+              }
+            }} />
         )}
 
         {screen === 'tags' && (
@@ -3944,14 +4795,28 @@ const App = () => {
                 // Only overwrite current* values if the device response actually contains them —
                 // the background lookup (glLookupDevice) may have already set these and we
                 // don't want to clobber them with null if the v1 response omits the fields.
-                // subscription may be array or object; prefer _subKey normalised by glLookupDevice.
                 ...(device._subKey           ? { currentSubscriptionKey: device._subKey           } : {}),
+                ...(device._subId            ? { currentSubscriptionId:  device._subId             } : {}),
                 ...(device.application?.id   ? { currentApplicationId:   device.application.id    } : {}),
               });
-              console.log('[onSuccess] _subKey:', device._subKey, '| application?.id:', device.application?.id);
+              console.log('[onSuccess] _subKey:', device._subKey, '| application?.id:', device.application?.id, '| skipDeviceFound:', summary.skipDeviceFound);
+              // skipDeviceFound means user already saw device_found and chose Update — go straight to provisioning
               enterScreen(mapped ? 'subscription' : 'device_type');
             }}
             onBack={() => setScreen('location')} />
+        )}
+
+        {screen === 'device_found' && (
+          <DeviceFoundScreen summary={summary} settings={liveSettings} api={api}
+            onViewStatus={() => setScreen('device_status')}
+            onProvision={() => { upd({ skipDeviceFound: true }); enterScreen('tags'); }}
+            onBack={() => { setSummary({}); setScreen('scan'); }} />
+        )}
+
+        {screen === 'device_status' && (
+          <DeviceStatusScreen summary={summary} settings={liveSettings} api={api}
+            onProvision={() => { upd({ skipDeviceFound: true }); enterScreen('tags'); }}
+            onBack={() => setScreen('device_found')} />
         )}
 
         {screen === 'device_type' && (
