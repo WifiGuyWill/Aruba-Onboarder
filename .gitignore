@@ -2,4 +2,5 @@ node_modules/
 .wrangler/
 .DS_Store
 .claude/
+package.json
 package-lock.json
