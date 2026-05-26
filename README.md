@@ -12,7 +12,7 @@ Scan a device's serial number and MAC barcodes, then follow the guided steps to:
 
 1. Register the device in HPE GreenLake
 2. Assign a subscription
-3. Assign to an application (Aruba Central or UXI)
+3. Assign to an application (Aruba Central)
 4. Configure site and function in Aruba Central
 5. Apply tags and location
 6. Review and confirm — the app handles all API calls
@@ -56,19 +56,6 @@ On first open the app shows a welcome screen, then takes you to **Settings** to 
 - Credentials are stored in **browser local storage only** — never sent to or stored on any server
 - API calls are routed through a lightweight Cloudflare proxy for browser compatibility (CORS) — nothing is logged or stored server-side
 - All provisioning changes are shown on a **Review & Confirm** screen before any API calls are made
-
----
-
-## Deploying
-
-The app is deployed via [Cloudflare Pages](https://pages.cloudflare.com). To deploy your own instance:
-
-```bash
-npm install
-npx wrangler pages deploy . --project-name your-project-name
-```
-
-See `DEPLOY.md` for full deployment notes.
 
 ---
 
