@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521m -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521n -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -1282,21 +1282,21 @@ const liveApi = {
     const baseUrl = `https://${centralUrl}/network-config/v1alpha1/system-info` +
       `?scope-id=${encodeURIComponent(scopeId)}&persona=${resolvedPersona}&object_type=LOCAL`;
 
-    // New Central (internal cluster) uses a YANG model where hostname is nested inside
-    // a 'profile' container. Profile name is persona-dependent.
-    // Standard Central uses a flat { hostname } body.
-    // Try profile-wrapped first, then flat as fallback.
-    const profileName = resolvedPersona.includes('SWITCH') ? 'sys-system-info-profile' : 'default_sys_info';
+    // Central YANG model: hostname is nested inside a 'profile' container.
+    // As of 2026-05-21, 'sys-system-info-profile' is the correct name for all device types.
+    // Previously APs used 'default_sys_info' — keep as second attempt for older clusters.
+    // Fall back to flat { hostname } for any standard Central clusters that haven't updated.
     const bodies = [
-      { profile: [{ name: profileName, hostname }] },  // New Central / internal cluster
-      { hostname },                                      // Standard Central fallback
+      { profile: [{ name: 'sys-system-info-profile', hostname }] },  // Current Central (all types)
+      { profile: [{ name: 'default_sys_info',         hostname }] },  // Legacy AP profile name
+      { hostname },                                                     // Flat fallback (older Central)
     ];
 
     // When no hostname is set, POST to create; when one exists, PATCH to update.
     // Always try both in case hostnameExists was detected incorrectly.
     const methods = hostnameExists ? ['PATCH', 'POST'] : ['POST', 'PATCH'];
 
-    console.log(`[centralSetHostname] scope_id=${scopeId} persona=${resolvedPersona} profileName=${profileName} hostnameExists=${hostnameExists}`);
+    console.log(`[centralSetHostname] scope_id=${scopeId} persona=${resolvedPersona} hostnameExists=${hostnameExists}`);
 
     for (const body of bodies) {
       for (const method of methods) {
