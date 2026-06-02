@@ -1270,6 +1270,39 @@ const liveApi = {
     }
   },
 
+  async centralGetDeviceAlerts({ deviceType, siteId, centralToken, centralUrl, status = 'Active' }) {
+    if (!centralToken || !centralUrl) return [];
+    // Map internal deviceType codes → Central API values
+    const dtMap = { AP: 'Access Point', SWITCH: 'Switch', GATEWAY: 'Gateway' };
+    const centralDt = dtMap[deviceType] || null;
+
+    // Build filter using %20 for spaces (not + from URLSearchParams — OData APIs require RFC 3986 encoding)
+    // Active: scope by deviceType for relevance.
+    // Cleared/Deferred: omit deviceType — Central returns a subset that misses some alerts when filtered.
+    const filterParts = [`status eq '${status}'`];
+    if (siteId) filterParts.push(`siteId eq '${siteId}'`);
+    if (centralDt && status === 'Active') filterParts.push(`deviceType eq '${centralDt}'`);
+    const filterStr = encodeURIComponent(filterParts.join(' and '));
+    const qs = `filter=${filterStr}&limit=100&sort=${encodeURIComponent('severity asc')}`;
+
+    const url = `https://${centralUrl}/network-notifications/v1/alerts?${qs}`;
+    let items = null;
+    try {
+      const res = await proxyCall({ url, token: centralToken });
+      const text = await res.text();
+      console.log(`[centralGetDeviceAlerts] ${url} → ${res.status}`);
+      console.log(`[centralGetDeviceAlerts] response body:`, text.slice(0, 500));
+      if (res.ok) {
+        const data = JSON.parse(text);
+        items = data.items || [];
+      }
+    } catch (e) { console.warn('[centralGetDeviceAlerts] failed:', url, e.message); }
+    if (!items) return [];
+
+    console.log(`[centralGetDeviceAlerts] status=${status} siteId=${siteId} deviceType=${centralDt} returning=${items.length}`);
+    return items;
+  },
+
   async centralSetHostname({ serial, hostname, hostnameExists, scopeId, persona, deviceType, centralToken, centralUrl }) {
     const errors = [];
 
@@ -1412,6 +1445,18 @@ const demoApi = {
     return { _scopeId: '73891316876853001' };
   },
   async centralSetHostname()   { await delay(500); return { success: true }; },
+  async centralGetDeviceAlerts({ serial, status = 'Active' } = {}) {
+    await delay(400);
+    if (!(serial || '').toUpperCase().startsWith('EXIST')) return [];
+    if (status === 'Active') return [
+      { key: 'demo-1', name: 'Insufficient PoE Received', summary: `AP ${serial} did not receive the requested PoE power which may limit its functions.`, severity: 'Critical', category: 'System', status: 'Active', created_at: '2025-12-10T07:04:33.352Z' },
+      { key: 'demo-2', name: 'USB Device Removed from AP', summary: `A USB device was removed from the AP ${serial}'s USB port.`, severity: 'Minor', category: 'System', status: 'Active', created_at: '2025-12-10T08:31:36.710Z' },
+    ];
+    if (status === 'Cleared') return [
+      { key: 'demo-3', name: 'AP Process Crash', summary: `The dpimgr process crashed on ${serial}.`, severity: 'Major', category: 'System', status: 'Cleared', cleared_reason: 'DB TTL Cleanup', created_at: '2025-11-20T09:22:13.642Z', updated_at: '2025-11-20T10:48:29.959Z' },
+    ];
+    return [];
+  },
   async centralGetDeviceStats({ serial } = {}) {
     await delay(700);
     if (!(serial || '').toUpperCase().startsWith('EXIST')) return null;
@@ -2894,12 +2939,101 @@ const DeviceFoundScreen = ({ summary, settings, api, onViewStatus, onProvision, 
 };
 
 // ── SCREEN: DEVICE STATUS ─────────────────────────────────────────────────────
+// ── ALERTS CARD (active + lazy cleared/deferred) ──────────────────────────────
+const AlertsCard = ({ alerts, headerColor, borderColor, AlertItem, api, serial, deviceType, siteId, deviceName, settings }) => {
+  const [history, setHistory]       = useState(null);  // null = not fetched, [] = fetched empty
+  const [histLoading, setHistLoading] = useState(false);
+  const [histError, setHistError]   = useState(null);
+
+  const loadHistory = () => {
+    if (history !== null || histLoading) return;
+    setHistLoading(true);
+    setHistError(null);
+    const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
+    const centralToken = settings.centralToken || settings.token;
+
+    Promise.all([
+      api.centralGetDeviceAlerts({ deviceType, siteId, centralToken, centralUrl, status: 'Cleared' }).catch(() => []),
+      api.centralGetDeviceAlerts({ deviceType, siteId, centralToken, centralUrl, status: 'Deferred' }).catch(() => []),
+    ]).then(([cleared, deferred]) => {
+      let merged = [...cleared, ...deferred].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+      // Filter to this device by matching deviceName in the alert summary (Central puts the device
+      // name in the summary text — it's the only reliable identifier available in the response)
+      if (deviceName) {
+        const needle = deviceName.toLowerCase();
+        const matched = merged.filter(a => (a.summary || '').toLowerCase().includes(needle));
+        if (matched.length > 0) merged = matched;
+      }
+      setHistory(merged);
+      setHistLoading(false);
+    }).catch(e => {
+      setHistError(e.message);
+      setHistLoading(false);
+    });
+  };
+
+  return (
+    <div className="rounded-2xl p-4" style={{ background: 'rgba(255,255,255,0.04)', border: `1px solid ${borderColor}` }}>
+      {/* Header */}
+      <p className="text-xs font-bold uppercase tracking-widest mb-3" style={{ color: headerColor }}>
+        {alerts.length > 0 ? `⚠️ Active Alerts (${alerts.length})` : '✅ Active Alerts'}
+      </p>
+
+      {/* Active alerts */}
+      {alerts.length === 0 ? (
+        <p className="text-gray-500 text-xs">No active alerts</p>
+      ) : (
+        <div className="space-y-3">
+          {alerts.map((a, i) => <AlertItem key={a.key || i} a={a} i={i} />)}
+        </div>
+      )}
+
+      {/* Cleared / Deferred — lazy load */}
+      {history === null && !histLoading && (
+        <button
+          onClick={loadHistory}
+          className="mt-3 w-full text-xs text-gray-600 py-2 rounded-xl transition-all active:scale-95"
+          style={{ border: '1px solid rgba(255,255,255,0.07)' }}>
+          View cleared &amp; deferred alerts ›
+        </button>
+      )}
+
+      {histLoading && (
+        <div className="mt-3 flex items-center justify-center gap-2 py-2">
+          <Spinner size={14} />
+          <span className="text-gray-600 text-xs">Loading history…</span>
+        </div>
+      )}
+
+      {histError && (
+        <p className="mt-3 text-red-400 text-xs">Failed to load history: {histError}</p>
+      )}
+
+      {history !== null && !histLoading && (
+        <div className="mt-4">
+          <p className="text-xs font-bold uppercase tracking-widest text-gray-600 mb-3">
+            Cleared &amp; Deferred {history.length > 0 ? `(${history.length})` : ''}
+          </p>
+          {history.length === 0 ? (
+            <p className="text-gray-600 text-xs">No cleared or deferred alerts</p>
+          ) : (
+            <div className="space-y-3">
+              {history.map((a, i) => <AlertItem key={a.key || i} a={a} i={i} />)}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => {
   const [stats, setStats]               = useState(null);
   const [loading, setLoading]           = useState(true);
   const [siteName, setSiteName]         = useState(null);
   const [subDisplay, setSubDisplay]     = useState(null);
   const [locationName, setLocationName] = useState(null);
+  const [alerts, setAlerts]             = useState(null);
 
   useEffect(() => {
     const centralUrl = CLUSTERS.find(c => c.id === (settings.centralCluster || 'eu1'))?.url || CLUSTERS[0].url;
@@ -2916,6 +3050,18 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
     const sitesPromise = summary.currentSiteId
       ? api.centralGetSites({ centralToken, centralUrl, token }).catch(() => [])
       : Promise.resolve([]);
+
+    // Alerts fetched after stats so we have the device hostname for matching
+    const alertsPromise = statsPromise.then(d =>
+      api.centralGetDeviceAlerts({
+        serial: summary.serial,
+        deviceType: summary.deviceType,
+        siteId: summary.currentSiteId || null,
+        deviceName: d?.name || null,
+        centralToken,
+        centralUrl,
+      })
+    ).catch(e => { console.warn('[DeviceStatusScreen] alerts error:', e.message); return []; });
 
     const subPromise = summary.currentSubscriptionId
       ? proxyCall({ url: `${GL_BASE}/subscriptions/v1/subscriptions/${summary.currentSubscriptionId}`, token })
@@ -2936,7 +3082,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
           .catch(() => null)
       : Promise.resolve(null);
 
-    Promise.all([statsPromise, sitesPromise, subPromise, locPromise]).then(([d, sites, sub, loc]) => {
+    Promise.all([statsPromise, sitesPromise, subPromise, locPromise, alertsPromise]).then(([d, sites, sub, loc, alts]) => {
       setStats(d);
       let resolvedSite = null;
       if (summary.currentSiteId && sites?.length) {
@@ -2947,6 +3093,7 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
       if (resolvedSite) setSiteName(resolvedSite);
       if (sub) setSubDisplay(sub);
       if (loc) setLocationName(loc);
+      setAlerts(alts || []);
       setLoading(false);
     });
   }, []);
@@ -3338,6 +3485,65 @@ const DeviceStatusScreen = ({ summary, settings, api, onProvision, onBack }) => 
               </div>
             </div>
           )}
+
+          {/* Alerts — active shown immediately; cleared/deferred loaded on demand */}
+          {alerts !== null && (() => {
+            const sevColor = s => {
+              switch ((s || '').toLowerCase()) {
+                case 'critical': return { bg: 'rgba(239,68,68,0.12)',  border: 'rgba(239,68,68,0.35)',  text: '#fca5a5' };
+                case 'major':    return { bg: 'rgba(249,115,22,0.12)', border: 'rgba(249,115,22,0.35)', text: '#fdba74' };
+                case 'minor':    return { bg: 'rgba(234,179,8,0.12)',  border: 'rgba(234,179,8,0.35)',  text: '#fde047' };
+                default:         return { bg: 'rgba(99,102,241,0.08)', border: 'rgba(99,102,241,0.25)', text: '#a5b4fc' };
+              }
+            };
+            const statusColor = s => {
+              switch ((s || '').toLowerCase()) {
+                case 'cleared':  return '#6ee7b7';
+                case 'deferred': return '#a5b4fc';
+                default:         return '#9ca3af';
+              }
+            };
+            const fmtAlertDate = iso => {
+              if (!iso) return null;
+              const d = new Date(iso);
+              return isNaN(d) ? null : d.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+            };
+            const AlertItem = ({ a, i }) => {
+              const c = sevColor(a.severity);
+              return (
+                <div key={a.key || i} className="rounded-xl p-3 text-xs" style={{ background: c.bg, border: `1px solid ${c.border}` }}>
+                  <div className="flex items-start justify-between gap-2 mb-1">
+                    <span className="font-semibold text-white leading-tight">{a.name}</span>
+                    <span className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" style={{ background: c.bg, border: `1px solid ${c.border}`, color: c.text }}>{a.severity}</span>
+                  </div>
+                  {a.summary && <p className="text-gray-400 leading-snug mb-1">{a.summary}</p>}
+                  <div className="flex gap-3 text-gray-600">
+                    {a.category && <span>{a.category}</span>}
+                    {fmtAlertDate(a.created_at) && <span>{fmtAlertDate(a.created_at)}</span>}
+                    {a.status && a.status !== 'Active' && <span style={{ color: statusColor(a.status) }}>{a.status}</span>}
+                    {a.cleared_reason && <span className="text-gray-600 italic">{a.cleared_reason}</span>}
+                  </div>
+                </div>
+              );
+            };
+            const hasCritical  = alerts.some(a => (a.severity||'').toLowerCase() === 'critical');
+            const headerColor  = hasCritical ? '#fca5a5' : alerts.length > 0 ? '#fdba74' : '#6ee7b7';
+            const borderColor  = alerts.length > 0 ? 'rgba(239,68,68,0.3)' : 'rgba(255,255,255,0.08)';
+            return (
+              <AlertsCard
+                alerts={alerts}
+                headerColor={headerColor}
+                borderColor={borderColor}
+                AlertItem={AlertItem}
+                api={api}
+                serial={summary.serial}
+                deviceType={summary.deviceType}
+                siteId={summary.currentSiteId}
+                deviceName={stats?.name || null}
+                settings={settings}
+              />
+            );
+          })()}
 
         </>)}
       </div>
