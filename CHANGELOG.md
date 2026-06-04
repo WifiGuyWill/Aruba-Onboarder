@@ -8,6 +8,32 @@ All notable changes to the HPE Aruba Device Onboarder are documented here.
 
 ---
 
+## [2026-06-04] — Barcode Scanner Overhaul
+
+### Changed
+
+- **Replaced `html5-qrcode` with `@ericblade/quagga2`** — Quagga2 is purpose-built for 1D barcodes (Code 128 / Code 39) and resolves field reports of needing to hold the device ~1 inch from the label to get a reliable scan. Normal working distance (6–12 inches) now works reliably.
+
+### Added
+
+- **Region of interest (ROI)** — decode area locked to the green box overlay (`area: 40% top/bottom, 5% left/right`). Adjacent barcodes on Aruba labels no longer accidentally trigger.
+- **Torch/flashlight toggle** (`💡`) — appears bottom-right of the camera view on devices that support it. Useful in server rooms and low-light environments.
+- **Duplicate scan guard** — once a MAC is captured the scanner ignores further MAC scans until the serial is read, and vice versa. Implemented via ref (not state) to avoid stale closure issues. Resets after each device pair in batch mode.
+
+### Fixed
+
+- **1920×1080 camera resolution** requested at startup — more pixels per barcode at normal distance
+- **Camera window height** reduced to 200px so the confirmation UI is visible without scrolling
+- **Confirm threshold** reduced 3 → 2 consecutive reads for faster acceptance
+- **Decode rate** increased 20 → 30 fps for more attempts per second
+
+### Internal
+
+- Closes issue #12
+- Build: `20260604`
+
+---
+
 ## [2026-06-03] — Active Alerts on Device Status Screen
 
 ### Added
