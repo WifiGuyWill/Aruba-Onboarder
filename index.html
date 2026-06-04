@@ -1631,13 +1631,22 @@ const BarcodeScanner = ({ onScan, onCameraError, continuous = false }) => {
   const cooldownRef  = useRef(false);
   const lastValueRef = useRef(null);
   const confirmCount = useRef(0);
-  const CONFIRM_NEEDED = 3; // same value must decode this many times before accepting
+  const scannerRef   = useRef(null);
+  const CONFIRM_NEEDED = 2; // same value must decode this many times before accepting
+
+  const [torchOn, setTorchOn]           = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
 
   useEffect(() => {
     const scanner = new Html5Qrcode('qr-reader-div');
+    scannerRef.current = scanner;
     scanner.start(
       { facingMode: 'environment' },
-      { fps: 20, qrbox: { width: 280, height: 130 }, aspectRatio: 1.6 },
+      {
+        fps: 30,
+        qrbox: (w, h) => ({ width: Math.min(w * 0.85, 400), height: 110 }),
+        aspectRatio: 1.6,
+      },
       (text) => {
         if (cooldownRef.current) return;
         // Multi-scan confirmation: require CONFIRM_NEEDED consecutive identical reads
@@ -1658,21 +1667,46 @@ const BarcodeScanner = ({ onScan, onCameraError, continuous = false }) => {
         }
       },
       () => {}
-    ).catch(() => onCameraError('Camera access denied. Use manual entry below.'));
+    ).then(() => {
+      // Check torch support after camera starts
+      const track = scanner.getRunningTrackCapabilities?.();
+      if (track?.torch) setTorchSupported(true);
+    }).catch(() => onCameraError('Camera access denied. Use manual entry below.'));
     return () => { scanner.isScanning && scanner.stop().catch(() => {}); };
   }, []);
+
+  const toggleTorch = () => {
+    const scanner = scannerRef.current;
+    if (!scanner) return;
+    const next = !torchOn;
+    scanner.applyVideoConstraints({ advanced: [{ torch: next }] })
+      .then(() => setTorchOn(next))
+      .catch(() => {});
+  };
 
   return (
     <div className="relative bg-black rounded-2xl overflow-hidden h-full">
       <div id="qr-reader-div" style={{ height: '100%' }} />
       <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-        <div className="relative" style={{ width: 260, height: 120 }}>
+        <div className="relative" style={{ width: '85%', maxWidth: 400, height: 110 }}>
           {[['top-0 left-0','border-t-2 border-l-2 rounded-tl-lg'],['top-0 right-0','border-t-2 border-r-2 rounded-tr-lg'],
             ['bottom-0 left-0','border-b-2 border-l-2 rounded-bl-lg'],['bottom-0 right-0','border-b-2 border-r-2 rounded-br-lg']
           ].map(([pos, cls]) => <div key={pos} className={`absolute ${pos} w-6 h-6 border-emerald-400 ${cls}`} />)}
           <div className="absolute inset-x-0 top-1/2 h-px bg-emerald-400 opacity-60 animate-pulse" />
         </div>
       </div>
+      {/* Torch toggle — only shown when supported */}
+      {torchSupported && (
+        <button
+          onClick={toggleTorch}
+          className="pointer-events-auto absolute bottom-3 right-3 w-9 h-9 rounded-full flex items-center justify-center transition-all active:scale-90"
+          style={{
+            background: torchOn ? 'rgba(251,191,36,0.25)' : 'rgba(255,255,255,0.1)',
+            border: torchOn ? '1px solid rgba(251,191,36,0.6)' : '1px solid rgba(255,255,255,0.2)',
+          }}>
+          <span style={{ fontSize: 18 }}>💡</span>
+        </button>
+      )}
     </div>
   );
 };
