@@ -8,16 +8,14 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://unpkg.com/@ericblade/quagga2@1.12.1/dist/quagga.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
   <style>
     * { -webkit-tap-highlight-color: transparent; box-sizing: border-box; }
     body { background: #111827; min-height: 100vh; margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-    #qr-reader-div { width: 100% !important; height: 100% !important; overflow: hidden !important; border: none !important; background: transparent !important; }
-    #qr-reader-div video { width: 100% !important; height: 100% !important; object-fit: cover; border-radius: 16px; }
-    #qr-reader-div__scan_region { background: transparent !important; }
-    #qr-reader-div__dashboard { display: none !important; }
-    #qr-reader-div__status_span { display: none !important; }
+    #qr-reader-div { width: 100% !important; height: 100% !important; overflow: hidden !important; border: none !important; background: transparent !important; position: relative; }
+    #qr-reader-div video { width: 100% !important; height: 100% !important; object-fit: cover !important; border-radius: 16px; display: block; }
+    #qr-reader-div canvas { display: none !important; } /* hide Quagga2 debug overlay */
     .step-enter { animation: slideIn 0.25s ease-out; }
     @keyframes slideIn { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
     .spinner { border: 3px solid rgba(16,185,129,0.2); border-top: 3px solid #10b981; border-radius: 50%; width: 36px; height: 36px; animation: spin 0.7s linear infinite; }
@@ -1631,48 +1629,107 @@ const BarcodeScanner = ({ onScan, onCameraError, continuous = false }) => {
   const cooldownRef  = useRef(false);
   const lastValueRef = useRef(null);
   const confirmCount = useRef(0);
-  const CONFIRM_NEEDED = 3; // same value must decode this many times before accepting
+  const CONFIRM_NEEDED = 2;
+
+  const [torchOn, setTorchOn]               = useState(false);
+  const [torchSupported, setTorchSupported] = useState(false);
 
   useEffect(() => {
-    const scanner = new Html5Qrcode('qr-reader-div');
-    scanner.start(
-      { facingMode: 'environment' },
-      { fps: 20, qrbox: { width: 280, height: 130 }, aspectRatio: 1.6 },
-      (text) => {
-        if (cooldownRef.current) return;
-        // Multi-scan confirmation: require CONFIRM_NEEDED consecutive identical reads
-        if (text === lastValueRef.current) {
-          confirmCount.current += 1;
-        } else {
-          lastValueRef.current = text;
-          confirmCount.current = 1;
-        }
-        if (confirmCount.current < CONFIRM_NEEDED) return;
-        // Confirmed — reset and fire
-        lastValueRef.current = null;
-        confirmCount.current = 0;
-        cooldownRef.current = true;
-        onScan(text);
-        if (continuous) {
-          setTimeout(() => { cooldownRef.current = false; }, 2000);
-        }
+    let running = false;
+
+    Quagga.init({
+      inputStream: {
+        type: 'LiveStream',
+        target: document.querySelector('#qr-reader-div'),
+        constraints: {
+          facingMode: 'environment',
+          width:  { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        // Restrict decoding to the green box region only.
+        // Area is applied to the raw video frame — use large offsets to
+        // match the narrow horizontal bar shown on screen.
+        area: { top: '40%', bottom: '40%', left: '5%', right: '5%' },
       },
-      () => {}
-    ).catch(() => onCameraError('Camera access denied. Use manual entry below.'));
-    return () => { scanner.isScanning && scanner.stop().catch(() => {}); };
+      locator: { patchSize: 'medium', halfSample: true },
+      decoder: {
+        // Code 128 is what Aruba uses; Code 39 as fallback
+        readers: ['code_128_reader', 'code_39_reader'],
+      },
+      locate: true,
+      frequency: 30,
+    }, (err) => {
+      if (err) {
+        onCameraError('Camera access denied. Use manual entry below.');
+        return;
+      }
+      running = true;
+      Quagga.start();
+      // Check torch support
+      try {
+        const track = Quagga.CameraAccess.getActiveTrack();
+        if (track?.getCapabilities?.()?.torch) setTorchSupported(true);
+      } catch (e) {}
+    });
+
+    const onDetected = (result) => {
+      const text = result?.codeResult?.code;
+      if (!text || cooldownRef.current) return;
+      if (text === lastValueRef.current) {
+        confirmCount.current += 1;
+      } else {
+        lastValueRef.current = text;
+        confirmCount.current = 1;
+      }
+      if (confirmCount.current < CONFIRM_NEEDED) return;
+      lastValueRef.current = null;
+      confirmCount.current = 0;
+      cooldownRef.current  = true;
+      onScan(text);
+      if (continuous) setTimeout(() => { cooldownRef.current = false; }, 2000);
+    };
+
+    Quagga.onDetected(onDetected);
+
+    return () => {
+      Quagga.offDetected(onDetected);
+      if (running) Quagga.stop();
+    };
   }, []);
+
+  const toggleTorch = () => {
+    try {
+      const track = Quagga.CameraAccess.getActiveTrack();
+      if (!track) return;
+      const next = !torchOn;
+      track.applyConstraints({ advanced: [{ torch: next }] })
+        .then(() => setTorchOn(next)).catch(() => {});
+    } catch (e) {}
+  };
 
   return (
     <div className="relative bg-black rounded-2xl overflow-hidden h-full">
-      <div id="qr-reader-div" style={{ height: '100%' }} />
+      <div id="qr-reader-div" style={{ width: '100%', height: '100%' }} />
+      {/* Scan guide overlay */}
       <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-        <div className="relative" style={{ width: 260, height: 120 }}>
+        <div className="relative" style={{ width: '85%', maxWidth: 400, height: 110 }}>
           {[['top-0 left-0','border-t-2 border-l-2 rounded-tl-lg'],['top-0 right-0','border-t-2 border-r-2 rounded-tr-lg'],
             ['bottom-0 left-0','border-b-2 border-l-2 rounded-bl-lg'],['bottom-0 right-0','border-b-2 border-r-2 rounded-br-lg']
           ].map(([pos, cls]) => <div key={pos} className={`absolute ${pos} w-6 h-6 border-emerald-400 ${cls}`} />)}
           <div className="absolute inset-x-0 top-1/2 h-px bg-emerald-400 opacity-60 animate-pulse" />
         </div>
       </div>
+      {/* Torch toggle — shown only when device supports it */}
+      {torchSupported && (
+        <button onClick={toggleTorch}
+          className="pointer-events-auto absolute bottom-3 right-3 w-9 h-9 rounded-full flex items-center justify-center transition-all active:scale-90"
+          style={{
+            background: torchOn ? 'rgba(251,191,36,0.25)' : 'rgba(255,255,255,0.1)',
+            border: torchOn ? '1px solid rgba(251,191,36,0.6)' : '1px solid rgba(255,255,255,0.2)',
+          }}>
+          <span style={{ fontSize: 18 }}>💡</span>
+        </button>
+      )}
     </div>
   );
 };
@@ -1908,14 +1965,15 @@ const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
   const [cameraErr, setCameraErr] = useState('');
   const [pendingScan, setPendingScan] = useState(null); // raw string waiting for confirmation
   const confirmTimer = useRef(null);
+  const capturedRef  = useRef({ serial: false, mac: false }); // always-current capture state for scanner callbacks
 
   const processScan = useCallback(raw => {
     const result = parseBarcode(raw);
     if (!result.serial && !result.mac) return;
     setFields(prev => {
       const next = { ...prev };
-      if (result.serial) next.serial = result.serial;
-      if (result.mac)    next.mac    = result.mac;
+      if (result.serial) { next.serial = result.serial; capturedRef.current.serial = true; }
+      if (result.mac)    { next.mac    = result.mac;    capturedRef.current.mac    = true; }
       return next;
     });
     setScanCount(n => n + 1);
@@ -1938,6 +1996,9 @@ const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
   const handleScan = useCallback(raw => {
     const result = parseBarcode(raw);
     if (!result.serial && !result.mac) return;
+    // Use ref (not state) to check what's already captured — avoids stale closure issues
+    if (result.serial && capturedRef.current.serial) return;
+    if (result.mac    && capturedRef.current.mac)    return;
     if (settings.scanConfirm ?? true) {
       clearTimeout(confirmTimer.current);
       setPendingScan(raw);
@@ -1976,7 +2037,7 @@ const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
 
       {/* Camera + confirmation overlay */}
       {!cameraErr ? (
-        <div className="relative">
+        <div className="relative" style={{ height: 200 }}>
           <BarcodeScanner onScan={handleScan} onCameraError={setCameraErr} continuous />
           {pendingScan && (() => {
             const parsed = parseBarcode(pendingScan);
@@ -3914,6 +3975,7 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
   const [manualSerial, setManualSerial] = useState('');
   const [manualMac, setManualMac]   = useState('');
   const confirmTimer  = useRef(null);
+  const capturedRef   = useRef({ serial: false, mac: false });
   const demoIdxRef    = useRef(0);  // increments so each demo scan gets a unique serial
 
   // Core helper: add a device to the queue and kick off background lookup
@@ -3970,12 +4032,15 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
     const serial = current.serial;
     const mac    = current.mac;
     setCurrent({ serial: '', mac: '' });
+    capturedRef.current = { serial: false, mac: false }; // reset for next device
     addItemToQueue(serial, mac);
   }, [current.serial, current.mac]);
 
   const processScan = useCallback(raw => {
     const result = parseBarcode(raw);
     if (!result.serial && !result.mac) return;
+    if (result.serial) capturedRef.current.serial = true;
+    if (result.mac)    capturedRef.current.mac    = true;
     setCurrent(prev => ({
       serial: result.serial || prev.serial,
       mac:    result.mac    || prev.mac,
@@ -3985,6 +4050,9 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
   const handleScan = useCallback(raw => {
     const result = parseBarcode(raw);
     if (!result.serial && !result.mac) return;
+    // Use ref (not state) to check what's already captured — avoids stale closure issues
+    if (result.serial && capturedRef.current.serial) return;
+    if (result.mac    && capturedRef.current.mac)    return;
     if (settings.scanConfirm ?? true) {
       clearTimeout(confirmTimer.current);
       setPendingScan(raw);
