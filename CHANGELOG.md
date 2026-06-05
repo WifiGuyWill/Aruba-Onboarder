@@ -8,6 +8,30 @@ All notable changes to the HPE Aruba Device Onboarder are documented here.
 
 ---
 
+## [2026-06-04] — Scanner UX Improvements
+
+### Added
+
+- **Audio feedback** — short 1800Hz beep via Web Audio API fires on every successful scan (iOS + Android)
+- **Haptic feedback** — `navigator.vibrate(50)` pulse on successful scan (Android)
+- **Success animation** — green flash + ✓ checkmark overlaid on the scan box for 600ms
+- **On-screen guidance** — "Hold 6–12 inches away · steady · good lighting" shown below the camera window
+- **Reads Required setting** — new 1 / 2 / 3 selector in Settings → Scan Options (default 2) replacing the hardcoded confirm threshold; persisted to localStorage; applies to both single-scan and batch mode
+
+### Changed
+
+- `patchSize`: `medium` → `small` for finer detail sampling on dense 1D barcodes
+- ROI area top/bottom: `40%` → `45%` — tighter match to the green box overlay
+- Torch button moved to top-right to clear guidance text area
+- README: tech stack updated from `Html5Qrcode` to `Quagga2`; Device Status / Check Status flow documented
+
+### Internal
+
+- Closes issue #14
+- Build: `20260604b`
+
+---
+
 ## [2026-06-04] — Barcode Scanner Overhaul
 
 ### Changed
