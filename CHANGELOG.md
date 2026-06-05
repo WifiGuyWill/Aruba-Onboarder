@@ -24,7 +24,7 @@ All notable changes to the HPE Aruba Device Onboarder are documented here.
 - **Audio feedback** — short 1800Hz beep via Web Audio API fires on every successful scan (iOS + Android)
 - **Haptic feedback** — `navigator.vibrate(50)` pulse on successful scan (Android)
 - **Success animation** — green flash + ✓ checkmark overlaid on the scan box for 600ms
-- **On-screen guidance** — "Hold 6–12 inches away · steady · good lighting" shown below the camera window
+- **On-screen guidance** — "Hold 4-6 inches away · steady · good lighting" shown below the camera window
 - **Reads Required setting** — new 1 / 2 / 3 selector in Settings → Scan Options (default 2) replacing the hardcoded confirm threshold; persisted to localStorage; applies to both single-scan and batch mode
 
 ### Changed
