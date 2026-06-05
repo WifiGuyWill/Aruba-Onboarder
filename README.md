@@ -17,7 +17,9 @@ Scan a device's serial number and MAC barcodes, then follow the guided steps to:
 5. Apply tags and location
 6. Review and confirm — the app handles all API calls
 
-Supports new devices and existing devices already in GreenLake.
+**Already in GreenLake?** The app detects existing devices and offers two paths:
+- **Check Status** — live stats (uptime, firmware, clients, RF, alerts) pulled from GreenLake and Aruba Central
+- **Update** — re-enter the provisioning flow to change subscription, site, function, etc.
 
 ---
 
@@ -30,7 +32,7 @@ Supports new devices and existing devices already in GreenLake.
 | Hosting | Cloudflare Pages |
 | Proxy | Cloudflare Pages Function (`/functions/proxy.js`) — handles CORS for HPE API calls |
 | Auth | HPE GreenLake OAuth2 (unified token for both GreenLake and Aruba Central) |
-| Scanning | `Html5Qrcode` — multi-scan confirmation, auto-detects S/N vs MAC by prefix and format |
+| Scanning | `Quagga2` — purpose-built 1D barcode decoder (Code 128 / Code 39), region-of-interest locking, configurable read confirmation, audio + haptic feedback |
 
 There is no build step. The entire app is one HTML file — edit and deploy.
 
