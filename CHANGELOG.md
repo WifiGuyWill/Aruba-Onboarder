@@ -4,10 +4,6 @@ All notable changes to the HPE Aruba Device Onboarder are documented here.
 
 ---
 
-## [Unreleased]
-
----
-
 ## [2026-06-04] — Scanner Confirmation Default Off
 
 ### Changed
