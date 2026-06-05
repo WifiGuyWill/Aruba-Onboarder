@@ -8,6 +8,15 @@ All notable changes to the HPE Aruba Device Onboarder are documented here.
 
 ---
 
+## [2026-06-04] — Scanner Confirmation Default Off
+
+### Changed
+
+- **Scan Confirmation default: enabled → disabled** — the green flash, ✓ checkmark, and duplicate-scan guard make the confirmation overlay redundant for most users. Toggle remains in Settings for those who prefer it.
+- **Options badge** — "No confirm" chip removed (off is now the default). Badge only appears for non-default states: "Confirm on" when explicitly re-enabled, "Batch" when batch mode is active.
+
+---
+
 ## [2026-06-04] — Scanner UX Improvements
 
 ### Added
