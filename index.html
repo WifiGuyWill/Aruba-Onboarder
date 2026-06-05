@@ -1917,9 +1917,9 @@ const OptionsPanel = ({ s, set }) => {
         <div className="flex items-center gap-2.5">
           <span className="text-gray-400 text-sm">⚙️</span>
           <span className="text-gray-300 text-sm font-semibold">Options</span>
-          {(s.batchMode || !(s.scanConfirm ?? true)) && (
+          {(s.batchMode || s.scanConfirm) && (
             <span className="text-xs bg-emerald-500 bg-opacity-20 text-emerald-400 px-2 py-0.5 rounded-full font-semibold">
-              {[s.batchMode && 'Batch', !(s.scanConfirm ?? true) && 'No confirm'].filter(Boolean).join(' · ')}
+              {[s.batchMode && 'Batch', s.scanConfirm && 'Confirm on'].filter(Boolean).join(' · ')}
             </span>
           )}
         </div>
@@ -1933,7 +1933,7 @@ const OptionsPanel = ({ s, set }) => {
           <Toggle value={s.batchMode ?? false} onChange={set('batchMode')}
             label="Batch Mode"
             sublabel="Scan multiple devices at once into a queue, then provision them all together" />
-          <Toggle value={s.scanConfirm ?? true} onChange={set('scanConfirm')}
+          <Toggle value={s.scanConfirm ?? false} onChange={set('scanConfirm')}
             label="Scan Confirmation"
             sublabel="Preview each barcode scan before accepting — tap Rescan if it looks wrong (default: enabled)" />
           <div className="px-4 py-3.5">
@@ -2054,7 +2054,7 @@ const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
     // Use ref (not state) to check what's already captured — avoids stale closure issues
     if (result.serial && capturedRef.current.serial) return;
     if (result.mac    && capturedRef.current.mac)    return;
-    if (settings.scanConfirm ?? true) {
+    if (settings.scanConfirm ?? false) {
       clearTimeout(confirmTimer.current);
       setPendingScan(raw);
       confirmTimer.current = setTimeout(() => {
@@ -4108,7 +4108,7 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
     // Use ref (not state) to check what's already captured — avoids stale closure issues
     if (result.serial && capturedRef.current.serial) return;
     if (result.mac    && capturedRef.current.mac)    return;
-    if (settings.scanConfirm ?? true) {
+    if (settings.scanConfirm ?? false) {
       clearTimeout(confirmTimer.current);
       setPendingScan(raw);
       confirmTimer.current = setTimeout(() => { setPendingScan(null); processScan(raw); }, SCAN_CONFIRM_MS);
@@ -4790,7 +4790,7 @@ const defaultSettings = () => ({
   glClientId: '', glClientSecret: '', workspaceId: '',
   centralCluster: 'eu1',
   demoMode: false,
-  scanConfirm: true,
+  scanConfirm: false,
   batchMode: false,
 });
 
