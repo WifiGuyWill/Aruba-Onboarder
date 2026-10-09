@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20261008f -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20261008g -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -285,12 +285,21 @@ const liveApi = {
   // GreenLake: add device (v1 POST with nested network array, async)
   async glAddDevice({ serial, mac, tags, locationId, token }) {
     const deviceEntry = { serialNumber: serial };
-    // GreenLake only accepts colon-separated MACs. Normalise here as well as in the
-    // UI so no caller can send a bare-hex or dotted MAC; drop it if unparseable
-    // rather than failing the whole add on an optional field.
+    // macAddress is REQUIRED on every network device — verified against the live API:
+    // omitting it returns 400 HPE_GL_ERROR_BAD_REQUEST "network[0].macAddress: must
+    // not be null", while the identical payload with a MAC returns 202.
+    // GreenLake also only accepts colon-separated MACs, so normalise here as well as
+    // in the UI. Fail loudly rather than dropping an unparseable MAC: a precise
+    // client-side message beats an opaque server-side 400.
     const normMac = mac ? normaliseMac(mac) : null;
-    if (mac && !normMac) console.warn('[glAddDevice] unparseable MAC ignored:', mac);
-    if (normMac) deviceEntry.macAddress = normMac;
+    if (!normMac) {
+      throw new Error(
+        mac
+          ? `MAC address "${mac}" for ${serial} is not a valid 12-digit MAC, and GreenLake requires one to add a device.`
+          : `A MAC address is required to add ${serial} to GreenLake.`
+      );
+    }
+    deviceEntry.macAddress = normMac;
     if (tags && Object.keys(tags).length > 0) deviceEntry.tags = tags;
     if (locationId) deviceEntry.location = { id: locationId };
     const body = { network: [deviceEntry], compute: [], storage: [] };
@@ -4577,7 +4586,7 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
               autoCapitalize="characters"
               autoCorrect="off"
               spellCheck={false}
-              placeholder="MAC address (optional)  e.g. 00:0B:86:B8:64:18"
+              placeholder="MAC address  e.g. 00:0B:86:B8:64:18"
               className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-3 py-2.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm font-mono transition-colors"
             />
             {manualMac && !normaliseMac(manualMac) && (
@@ -4585,18 +4594,24 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
                 {manualMac.replace(/[^0-9A-F]/gi, '').length}/12 hex characters — colons are added automatically
               </p>
             )}
+            {!manualMac && manualSerial.trim().length >= 4 && (
+              <p className="text-gray-500 text-xs px-1">
+                A MAC address is required — GreenLake will not accept a device without one.
+              </p>
+            )}
             <button
               onClick={() => {
                 const s = manualSerial.trim();
-                if (s.length < 4) return;
-                // MAC is optional here, but if one was typed it must be complete —
-                // a partial MAC is rejected by GreenLake on add.
-                if (manualMac && !normaliseMac(manualMac)) return;
-                addItemToQueue(s, normaliseMac(manualMac));
+                const m = normaliseMac(manualMac);
+                // A complete MAC is mandatory: GreenLake rejects an add without one
+                // (400 "macAddress: must not be null"), so catch it here rather than
+                // letting the item sit in the queue and fail at submit.
+                if (s.length < 4 || !m) return;
+                addItemToQueue(s, m);
                 setManualSerial('');
                 setManualMac('');
               }}
-              disabled={manualSerial.trim().length < 4 || (!!manualMac && !normaliseMac(manualMac))}
+              disabled={manualSerial.trim().length < 4 || !normaliseMac(manualMac)}
               className="w-full py-2.5 rounded-xl text-sm font-semibold text-white bg-emerald-600 active:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
             >
               Add to queue →

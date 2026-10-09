@@ -4,7 +4,33 @@ All notable changes to the HPE Aruba Device Onboarder are documented here.
 
 ---
 
-## [2026-10-08] — Configuration Group Reminder
+## [2026-10-08] — MAC Address Is Mandatory (build 20261008g)
+
+GreenLake requires a MAC address on every network device. The batch flow's manual-entry form treated it as optional, letting a device into the queue that was guaranteed to fail later.
+
+### Fixed
+
+- **Batch manual entry now requires a complete MAC.** Previously the *Add to queue* button accepted an empty MAC field, which was labelled "(optional)". Such an item looked fine in the queue and then failed at submit with an opaque `400 … macAddress: must not be null`. The single-device flow already got this right; the batch flow now matches it.
+- **`glAddDevice` no longer silently discards an unparseable MAC.** It previously warned to the console, dropped the MAC and sent the add anyway — turning a fixable client-side problem into a server-side 400 that named a field the operator never saw. It now throws a specific error naming the serial and the offending value.
+
+### Changed
+
+- The manual MAC field is no longer labelled optional, and explains *why* it's required once a serial has been entered, rather than leaving the Add button disabled without explanation.
+
+### Notes
+
+Verified against the live API rather than inferred from documentation:
+
+| Payload | Result |
+| --- | --- |
+| Network device **without** `macAddress` | **400** `HPE_GL_ERROR_BAD_REQUEST` — `network[0].macAddress: must not be null` |
+| Identical payload **with** `macAddress` | **202 ACCEPTED** |
+
+The control used the same (deliberately invalid) serial in both cases, so MAC presence was the only variable. The async operation then failed on the bogus serial, as expected.
+
+This corrects an assumption rather than a regression: the field had been optional in batch manual entry since before the recent MAC-normalisation work, which tightened partial-MAC handling but left empty MACs — and an incorrect "optional field" comment — in place.
+
+
 
 Onboarding leaves a device in Classic Central's `default` group, where New Central does not own its configuration. The app can't fix that automatically (see below), so it now says so explicitly instead of implying the device is fully provisioned.
 
@@ -20,7 +46,7 @@ Automating this step was investigated and **deliberately not implemented** — i
 | --- | --- |
 | `GET /network-config/v1/device-groups` (New Central) | **200** — and usefully, only returns groups that already have New Central Config enabled |
 | `POST /network-config/v1/device-groups-add-devices` | **400** `API_ACCESS_RESTRICTED_IN_HYBRID_CLUSTER` |
-| Same, `v1alpha1`, real `desScopeId`, on the Central host and GreenLake base | Identical |
+| Same, `v1alpha1`, real `desScopeId`, on the Central host | Identical |
 | Classic `configuration/v{1,3}/groups`, `configuration/v1/devices/move` on the New Central host | **404 Route Not Found** — not served there |
 | GreenLake token against the Classic gateway (`*-apigw.central.arubanetworks.com`) | **401 `invalid_token`** |
 
