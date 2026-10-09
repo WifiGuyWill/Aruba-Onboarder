@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20260521n -->
+<!-- HPE Networking Device Onboarder — github.com/WifiGuyWill/Aruba-Onboarder — build:20261008f -->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -118,9 +118,11 @@ const DEVICE_FUNCTION_LABEL_TO_PERSONA = {
   'campus access point':  'CAMPUS_AP',
   'campus ap':            'CAMPUS_AP',
   'microbranch ap':       'MICROBRANCH_AP',
+  'micro branch ap':      'MICROBRANCH_AP',
   // Gateways
   'mobility gateway':     'MOBILITY_GW',
   'branch gateway':       'BRANCH_GW',
+  'branch gw':            'BRANCH_GW',
   'vpn concentrator':     'VPNC',
   // Switches
   'access switch':        'ACCESS_SWITCH',
@@ -131,6 +133,7 @@ const DEVICE_FUNCTION_LABEL_TO_PERSONA = {
   'aoss core':            'AOSS_CORE_SWITCH',
   // Other
   'bridge':               'BRIDGE',
+  'hybrid nac':           'HYBRID_NAC',
 };
 
 // Maps Central device_type → allowed persona IDs (matches Central UI logic)
@@ -167,6 +170,12 @@ const DEVICE_TYPE_META = {
 const GL_BASE = 'https://global.api.greenlake.hpe.com';
 // Standard HPE SSO token endpoint (used for standalone GL or Central credentials)
 const TOKEN_URL = 'https://sso.common.cloud.hpe.com/as/token.oauth2';
+
+// New Central system-info profile name used for per-device hostname config.
+// Matches HPE's own reference implementation (aruba/central-python-workflows
+// rename-hostnames), which hard-codes this profile name for this exact use case.
+const SYS_INFO_PROFILE = 'sys-system-info-profile';
+
 // Unified token endpoint — one token works for both GreenLake AND New Central.
 // Requires workspace_id embedded in the path.  Discovered via aruba/pycentral v2 SDK.
 const unifiedTokenUrl = workspaceId =>
@@ -276,7 +285,12 @@ const liveApi = {
   // GreenLake: add device (v1 POST with nested network array, async)
   async glAddDevice({ serial, mac, tags, locationId, token }) {
     const deviceEntry = { serialNumber: serial };
-    if (mac) deviceEntry.macAddress = mac;
+    // GreenLake only accepts colon-separated MACs. Normalise here as well as in the
+    // UI so no caller can send a bare-hex or dotted MAC; drop it if unparseable
+    // rather than failing the whole add on an optional field.
+    const normMac = mac ? normaliseMac(mac) : null;
+    if (mac && !normMac) console.warn('[glAddDevice] unparseable MAC ignored:', mac);
+    if (normMac) deviceEntry.macAddress = normMac;
     if (tags && Object.keys(tags).length > 0) deviceEntry.tags = tags;
     if (locationId) deviceEntry.location = { id: locationId };
     const body = { network: [deviceEntry], compute: [], storage: [] };
@@ -286,14 +300,18 @@ const liveApi = {
     if (res.status === 202) {
       const loc = res.headers.get('location');
       let pollFailed = false;
+      let pollErr = null;
       if (loc) {
         try {
           await pollAsync(`${GL_BASE}${loc}`, token);
-        } catch (pollErr) {
+        } catch (e) {
           // Async add failed — most common cause is device already exists in GreenLake.
           // Don't throw yet; fall through to the lookup below and use the existing record.
+          // Keep the error: if the device also isn't found, this message is the only
+          // explanation of *why* the add failed (blocked, invalid, claimed elsewhere).
           pollFailed = true;
-          console.warn('[glAddDevice] async op failed — checking if device already exists:', pollErr.message);
+          pollErr = e;
+          console.warn('[glAddDevice] async op failed — checking if device already exists:', e.message);
         }
       }
       // Brief pause — GreenLake sometimes needs a moment before the device
@@ -304,7 +322,22 @@ const liveApi = {
       if (!devRes.ok) throw new Error(`Could not retrieve device after add: ${devRes.status}`);
       const d = await devRes.json();
       const device = (d.items || [])[0];
-      if (!device) throw new Error(`Device add failed and device not found in GreenLake: ${serial}`);
+      if (!device) {
+        // Add failed and the device isn't in this workspace. Surface GreenLake's own
+        // reason verbatim — it distinguishes "blocked or invalid" (commonly: already
+        // claimed by another workspace) from a plain typo, which a generic
+        // "not found" message hides.
+        const upstream = pollErr?.message || '';
+        let msg = upstream || `Device could not be added and was not found in GreenLake: ${serial}`;
+        // GreenLake says "blocked or invalid" but not why. The usual cause is the
+        // device already being claimed in a different workspace.
+        if (/blocked or invalid/i.test(upstream)) {
+          msg += '\n\nThis usually means the device is already assigned to another GreenLake workspace, or the serial number is not recognised. Verify the serial, and check whether it needs releasing from its current workspace first.';
+        }
+        const err = new Error(msg);
+        err.errorCode = pollErr?.errorCode || '';
+        throw err;
+      }
       const subArr = Array.isArray(device.subscription) ? device.subscription : (device.subscription ? [device.subscription] : []);
       device._subKey = subArr[0]?.key || null;
       device._subId  = subArr[0]?.id  || null;
@@ -631,6 +664,28 @@ const liveApi = {
     throw new Error(`Create location error ${res1.status}: ${err1}`);
   },
 
+  // GreenLake: fetch a service-manager record by ID, resolving its display name.
+  //
+  // Version note: /service-catalog/v1beta1/service-managers/{id} was deprecated with an
+  // end-of-life of 2025-06-30 and is long past it. The stable /v1/ tier returns an
+  // equivalent record (same id / name / resourceUri), so we ask v1 first and only fall
+  // back to the legacy URI (or the resourceUri the API itself handed us) if v1 misses.
+  // NOTE: my-services has no v1 equivalent at all — that one stays on v1beta1 by design.
+  async _glFetchServiceManagerName({ smId, smUri, token }) {
+    const candidates = [`${GL_BASE}/service-catalog/v1/service-managers/${smId}`];
+    if (smUri) candidates.push(`${GL_BASE}${smUri}`);
+    candidates.push(`${GL_BASE}/service-catalog/v1beta1/service-managers/${smId}`);
+    for (const url of candidates) {
+      try {
+        const r = await proxyCall({ url, token });
+        if (!r.ok) continue;
+        const d = await r.json();
+        if (d?.name || d?.id) return d.name || d.id;
+      } catch (_) { /* try next candidate */ }
+    }
+    return null;
+  },
+
   // GreenLake: fetch provisioned services for this workspace.
   // Step 1 — my-services: region-indexed list of provisioned service IDs + regions.
   //   items[i] = { id: "region-id", provisions: [{ serviceManagerProvision: { serviceManager: {id}, region, provisionStatus } }] }
@@ -666,16 +721,7 @@ const liveApi = {
         .filter(p => !p.nameHint)
         .map(async p => {
           if (nameCache[p.smId]) return;
-          try {
-            // Use the resourceUri from the response (v1beta1) rather than assuming v1
-            const fetchUrl = p.smUri ? `${GL_BASE}${p.smUri}` : `${GL_BASE}/service-catalog/v1beta1/service-managers/${p.smId}`;
-            const r = await proxyCall({ url: fetchUrl, token });
-            if (r.ok) {
-              const d = await r.json();
-              nameCache[p.smId] = d.name || d.id || p.smId;
-            }
-          } catch (_) { /* ignore — fall back to ID */ }
-          if (!nameCache[p.smId]) nameCache[p.smId] = p.smId;
+          nameCache[p.smId] = (await liveApi._glFetchServiceManagerName({ smId: p.smId, smUri: p.smUri, token })) || p.smId;
         })
     );
 
@@ -779,51 +825,78 @@ const liveApi = {
   // Standard clusters expose sites on the cluster URL.
   // The HPE Internal cluster (internal.api.central.arubanetworks.com) uses the
   // GreenLake NRM API instead — same GL bearer token, different base URL.
+  //
+  // /network-config/v1/sites is the current API. The v1alpha1 version carries an
+  // explicit Sunset header (30 June 2026) and is kept only as a fallback.
+  // Docs: developer.arubanetworks.com/new-central-config/reference/getsitesv1
+  // Note: v1 caps `limit` at 100 and requires `offset`, so it must be paged —
+  // the old alpha call used limit=500 and silently truncated large workspaces.
   async centralGetSites({ centralToken, centralUrl, token }) {
-    const paths = [
-      '/configuration/v2/sites?limit=500',
-      '/monitoring/v2/sites?limit=500',
-      '/network-config/v1alpha1/sites',          // no params — limit= causes 400 on internal cluster
-      '/network-config/v1alpha1/sites?limit=100', // smaller limit in case 500 is out of range
-      '/configuration/v1/sites?limit=500',
-      '/platform/v1/sites?limit=500',
-    ];
+    // Normalize field names — older API uses site_id/site_name, newer uses id/scopeName
+    const normalize = (raw, source) => raw.map(s => ({
+      id:      s.id      ?? s.site_id  ?? s.scopeId,
+      name:    s.name    || s.site_name || s.scopeName || String(s.id || s.site_id),
+      city:    s.city    || '',
+      state:   s.state   || '',
+      country: s.country || '',
+      ...(source ? { _source: source } : {}),
+    }));
+
+    // Page through a v1 sites collection. Returns null if the first page fails
+    // (so the caller can fall through), or the accumulated items otherwise.
+    const pageV1 = async (base, tok) => {
+      const all = [];
+      for (let offset = 0; ; offset += 100) {
+        const url = `${base}/network-config/v1/sites?limit=100&offset=${offset}`;
+        const res = await proxyCall({ url, token: tok });
+        console.log('[centralGetSites] v1 offset', offset, '→', res.status);
+        if (!res.ok) return offset === 0 ? null : all;
+        const d = await res.json();
+        const items = d.items || d.sites || [];
+        all.push(...items);
+        const total = typeof d.total === 'number' ? d.total : null;
+        if (items.length < 100) break;
+        if (total !== null && all.length >= total) break;
+        if (offset > 10000) break; // safety stop
+      }
+      return all;
+    };
+
     console.log('[centralGetSites] cluster URL:', centralUrl);
+    const v1 = await pageV1(`https://${centralUrl}`, centralToken);
+    if (v1?.length) return normalize(v1);
+
+    const paths = [
+      // New Central alpha (still valid, sunset 30 June 2026).
+      // Classic Central endpoints (/configuration/*, /monitoring/v2/sites, /platform/*)
+      // were removed: they return Classic site IDs that the New Central scope API
+      // cannot resolve, so they could only ever offer sites that fail to assign.
+      '/network-config/v1alpha1/sites',
+      '/network-config/v1alpha1/sites?limit=100',
+    ];
     for (const path of paths) {
       const url = `https://${centralUrl}${path}`;
       const res = await proxyCall({ url, token: centralToken });
       console.log('[centralGetSites] tried', path, '→', res.status);
       if (!res.ok) continue;
       const d = await res.json();
-      const raw = d.sites || d.items || d.data || [];
-      // Normalize field names — older API uses site_id/site_name, newer uses id/scopeName
-      return raw.map(s => ({
-        id:      s.id      ?? s.site_id  ?? s.scopeId,
-        name:    s.name    || s.site_name || s.scopeName || String(s.id || s.site_id),
-        city:    s.city    || '',
-        state:   s.state   || '',
-        country: s.country || '',
-      }));
+      return normalize(d.sites || d.items || d.data || []);
     }
 
     // Fallback: GreenLake NRM API (used by the Internal cluster and potentially
     // other special clusters where Central doesn't expose the sites REST path).
     // Sites here have type "network-config/sites" with scopeId / scopeName fields.
+    // Tagged with _source so centralAssignSite targets the same base URL.
     if (token) {
       console.log('[centralGetSites] all Central paths failed — trying GreenLake NRM...');
+      const glV1 = await pageV1(GL_BASE, token);
+      if (glV1?.length) return normalize(glV1, 'greenlake-nrm');
+
       const glRes = await proxyCall({ url: `${GL_BASE}/network-config/v1alpha1/sites`, token });
-      console.log('[centralGetSites] GreenLake NRM →', glRes.status);
+      console.log('[centralGetSites] GreenLake NRM v1alpha1 →', glRes.status);
       if (glRes.ok) {
         const d = await glRes.json();
-        const raw = d.items || d.sites || [];
-        return raw.map(s => ({
-          id:      String(s.id ?? s.scopeId ?? ''),
-          name:    s.name    || s.scopeName || String(s.id ?? ''),
-          city:    s.city    || '',
-          state:   s.state   || '',
-          country: s.country || '',
-          _source: 'greenlake-nrm',  // tag so assign can use the right API
-        }));
+        return normalize(d.items || d.sites || [], 'greenlake-nrm');
       }
     }
 
@@ -834,35 +907,54 @@ const liveApi = {
   // Uses the network-monitoring devices list which contains persona (human-readable label),
   // deviceFunction, siteId for all device types reliably.
   // Called as a background task right after scan so SiteScreen + FunctionScreen can be pre-populated.
+  //
+  // /network-monitoring/v1/devices is the current API (v1alpha1 kept as fallback).
+  // v1 renamed `persona` → `deviceFunction` and uses cursor pagination via `next`.
+  // Docs: developer.arubanetworks.com/new-central/reference/getdevicesv1
   // Returns { siteId: string|null, persona: string|null }
   async centralGetDeviceSiteId({ serial, centralToken, centralUrl }) {
     if (!centralToken || !centralUrl || !serial) return { siteId: null, persona: null };
     const s = encodeURIComponent(serial);
-    // Try the network-monitoring devices list (v1alpha1) — returns persona + siteId reliably.
+
+    const readMatch = match => {
+      const siteId = match?.siteId || match?.site_id || null;
+      // v1alpha1 returns a human-readable persona label ("Campus Access Point");
+      // v1 returns deviceFunction. Map either to a persona ID.
+      let persona = match?.deviceFunction || match?.persona || match?.['device-function'] || null;
+      if (persona === 'None' || persona === 'NONE' || persona === 'none') persona = null;
+      if (persona) persona = DEVICE_FUNCTION_LABEL_TO_PERSONA[persona.toLowerCase()] || persona;
+      console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
+      return { siteId: siteId ? String(siteId) : null, persona: persona || null };
+    };
+    const findIn = items => items.find(item =>
+      String(item.serialNumber || item.serial || item.scopeName || item.id || '').toUpperCase() === serial.toUpperCase()
+    );
+
     // The filter param may or may not be server-side; we always do client-side matching too.
     for (const path of [
+      `/network-monitoring/v1/devices?serial=${s}`,
+      `/network-monitoring/v1/devices`,
       `/network-monitoring/v1alpha1/devices?serial=${s}`,
       `/network-monitoring/v1alpha1/devices`,
     ]) {
       try {
-        const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
-        console.log(`[centralGetDeviceSiteId] ${path} → ${res.status}`);
-        if (!res.ok) continue;
-        const d = await res.json();
-        const items = d.items || d.devices || (Array.isArray(d) ? d : []);
-        const match = items.find(item =>
-          String(item.serialNumber || item.serial || item.scopeName || item.id || '').toUpperCase() === serial.toUpperCase()
-        );
-        if (!match) continue;
-
-        const siteId = match?.siteId || match?.site_id || null;
-        // persona comes as a human-readable label: "Campus Access Point", "Mobility Gateway", etc.
-        let persona = match?.persona || match?.deviceFunction || match?.['device-function'] || null;
-        if (persona === 'None' || persona === 'NONE' || persona === 'none') persona = null;
-        // Map label → persona ID
-        if (persona) persona = DEVICE_FUNCTION_LABEL_TO_PERSONA[persona.toLowerCase()] || persona;
-        console.log('[centralGetDeviceSiteId] found for', serial, '| siteId:', siteId, '| persona:', persona);
-        return { siteId: siteId ? String(siteId) : null, persona: persona || null };
+        let url = `https://${centralUrl}${path}`;
+        // Follow the v1 cursor for a bounded number of pages so devices beyond the
+        // first page are still found in large workspaces.
+        for (let page = 0; page < 10 && url; page++) {
+          const res = await proxyCall({ url, token: centralToken });
+          console.log(`[centralGetDeviceSiteId] ${path} page ${page} → ${res.status}`);
+          if (!res.ok) break;
+          const d = await res.json();
+          const items = d.items || d.devices || (Array.isArray(d) ? d : []);
+          const match = findIn(items);
+          if (match) return readMatch(match);
+          const next = d.next || d.Next || d.nextCursor || null;
+          if (!next || !path.includes('/v1/')) break;
+          url = /^https?:\/\//.test(next)
+            ? next
+            : `https://${centralUrl}${path}${path.includes('?') ? '&' : '?'}next=${encodeURIComponent(next)}`;
+        }
       } catch (e) {
         console.warn(`[centralGetDeviceSiteId] ${path} failed:`, e.message);
       }
@@ -871,66 +963,104 @@ const liveApi = {
   },
 
   // Central: assign a device to a site.
-  // Site assignment is attempted but ALWAYS soft-fails on error — it never blocks provisioning.
-  // The site dropdown in the UI is kept so users can record their intended assignment,
-  // but the API endpoint is not universally available across cluster types.
   //
-  // Standard (public clusters): POST /configuration/v2/devices/move  or  /configuration/v1/devices/move
-  //   Body: { "serials": ["SERIAL"], "site_id": <int> }
-  // NRM / Internal cluster: POST /network-config/v1/site-add-devices
-  //   Body: { "devices": ["SERIAL"], "desScopeId": "SCOPE_ID_STRING" }
-  async centralAssignSite({ serial, siteId, centralToken, centralUrl }) {
+  // New Central / Scope Management v1 ONLY:
+  //   POST https://{cluster}/network-config/v1/site-add-devices
+  //   Body: { "desScopeId": "<site scope id>", "devices": ["SERIAL"] }
+  //   Returns 200 { code, status, message, items: [scopeId] }
+  //   Docs: developer.arubanetworks.com/new-central-config/reference/adddevicestositesmv1
+  //
+  // This endpoint is only supported on standalone New Central and Central On-Prem
+  // accounts. Hybrid accounts (those still showing the Classic Central toggle) get
+  // a 403/404 and the step soft-fails.
+  //
+  // DO NOT add a Classic Central fallback here.
+  // A previous version fell back to POST /configuration/v2/devices/move when the
+  // New Central paths failed. That endpoint belongs to the Classic management plane:
+  // it reports success, but the device is then provisioned in Classic and New Central
+  // flags it as "configured in Classic". Silently writing to the wrong management
+  // plane is worse than not assigning the site — a visible soft-fail lets the operator
+  // assign it correctly, whereas a false success leaves the device in a state that has
+  // to be unpicked by hand. Note that New Central scope IDs are numeric, so a
+  // "numeric ID means Classic" guard does not make such a fallback safe.
+  //
+  // Sites sourced from the GreenLake NRM fallback (see centralGetSites) live on the
+  // GreenLake base URL rather than the Central cluster — siteSource routes those.
+  //
+  // Any failure is a soft-fail: provisioning continues and the user is told to set the
+  // site manually.
+  async centralAssignSite({ serial, siteId, siteSource, centralToken, centralUrl, token }) {
     if (!siteId) throw Object.assign(new Error('No site selected'), { softFail: true });
 
     const softFail = msg => { throw Object.assign(new Error(msg), { softFail: true }); };
+    const describe = status =>
+      status === 403 ? 'this account is not a standalone New Central workspace (403)'
+      : status === 404 ? 'the site or endpoint was not found (404)'
+      : status === null ? 'no New Central endpoint was reachable'
+      : `the API returned ${status}`;
 
-    // Standard paths (public clusters)
-    const rawBody = `{"serials":${JSON.stringify([serial])},"site_id":${siteId}}`;
-    for (const path of ['/configuration/v2/devices/move', '/configuration/v1/devices/move']) {
-      const res = await proxyCall({
-        url: `https://${centralUrl}${path}`,
-        method: 'POST', token: centralToken,
-        body: rawBody, contentType: 'application/json',
-      });
-      console.log('[centralAssignSite] tried', path, '→', res.status);
-      if (res.status === 404) continue;
-      if (!res.ok) {
-        const txt = await res.text();
-        console.warn('[centralAssignSite] soft-fail on', path, res.status, txt);
-        softFail(`Site assignment not available on this cluster (${res.status}) — assign the site manually in Aruba Central`);
-      }
-      return res.json().catch(() => ({ success: true }));
+    // Defence in depth: no code path currently produces a 'classic'-sourced site
+    // (the Classic site endpoints were removed from centralGetSites), but if one is
+    // ever reintroduced, its IDs cannot be resolved by the New Central scope API.
+    // Fail clearly rather than attempting an assignment that cannot succeed.
+    if (siteSource === 'classic') {
+      softFail(
+        'Site assignment skipped — the site list came from Classic Central, so this site '
+        + 'cannot be assigned through the New Central API. Assign the site manually in Aruba Central.'
+      );
     }
 
-    // NRM paths (internal cluster / New Central) — desScopeId is a string scope ID
-    const nrmBody = { devices: [serial], desScopeId: String(siteId) };
-    for (const path of ['/network-config/v1/site-add-devices', '/network-config/v1alpha1/site-add-devices']) {
-      const res = await proxyCall({
-        url: `https://${centralUrl}${path}`,
-        method: 'POST', token: centralToken, body: nrmBody,
-      });
-      console.log('[centralAssignSite] NRM tried', path, '→', res.status);
-      if (res.status === 404) continue;
-      if (!res.ok) {
-        const txt = await res.text();
-        console.warn('[centralAssignSite] NRM soft-fail on', path, res.status, txt);
-        softFail(`Site assignment not available on this cluster (${res.status}) — assign the site manually in Aruba Central`);
+    // New Central scope-management API. Try the Central cluster first unless the site
+    // came from GreenLake NRM, in which case GreenLake is authoritative.
+    const nrmBody = { desScopeId: String(siteId), devices: [serial] };
+    const bases = siteSource === 'greenlake-nrm'
+      ? [{ base: GL_BASE, tok: token }, { base: `https://${centralUrl}`, tok: centralToken }]
+      : [{ base: `https://${centralUrl}`, tok: centralToken }, { base: GL_BASE, tok: token }];
+
+    let lastStatus = null;
+    for (const { base, tok } of bases) {
+      if (!base || !tok) continue;
+      for (const path of ['/network-config/v1/site-add-devices', '/network-config/v1alpha1/site-add-devices']) {
+        const res = await proxyCall({ url: `${base}${path}`, method: 'POST', token: tok, body: nrmBody });
+        console.log('[centralAssignSite] tried', base + path, '→', res.status);
+        if (res.ok) {
+          const d = await res.json().catch(() => null);
+          // Some clusters return 200 with a failure status in the envelope.
+          if (d && typeof d.status === 'string' && /fail|error/i.test(d.status)) {
+            console.warn('[centralAssignSite] 200 with failure envelope:', d);
+            softFail(`Site assignment failed — ${d.message || d.status}. Assign the site manually in Aruba Central.`);
+          }
+          return d || { success: true };
+        }
+        lastStatus = res.status;
+        const txt = await res.text().catch(() => '');
+        console.warn('[centralAssignSite] failed on', base + path, res.status, txt);
+        // 404 may just mean this API version isn't on the cluster — keep trying.
+        if (res.status !== 404) break;
       }
-      return res.json().catch(() => ({ success: true }));
     }
 
-    console.warn('[centralAssignSite] soft-fail — all paths exhausted on', centralUrl);
-    softFail('Site assignment not available on this cluster — assign the site manually in Aruba Central');
+    console.warn('[centralAssignSite] soft-fail — all New Central paths exhausted on', centralUrl);
+    softFail(`Site assignment failed — ${describe(lastStatus)}. Assign the site manually in Aruba Central.`);
   },
 
   // Central: assign device function (persona).
   // Endpoint: POST /network-config/v1alpha1/persona-assignment/{persona}
+  //
+  // NOTE: there is no v1 version of this API as of 2026-10. The reference page's
+  // operationId reads like a stable name (createPersonaAssignmentPersonaDeviceListByID)
+  // but the spec's info.version is still "v1alpha1", so alpha is correct here —
+  // do not "upgrade" these paths to /v1 without re-checking the published spec.
+  // Docs: developer.arubanetworks.com/new-central-config/reference/createpersonaassignmentpersonadevicelistbyid
+  //
   // Body formats vary by cluster version:
   //   v2 body: { "device-id-list-v2": ["SERIAL_OR_UUID"] }      ← preferred
   //   v1 body: { "device-id": ["SERIAL_OR_UUID"] }
   //   list body: { "persona-device-list": ["SERIAL"] }           ← some clusters
   //   old URL: POST /network-config/v1alpha1/persona-assignment
   //            body: { "persona-device-list": [{ "device-function": persona, "device-id": ["SERIAL"] }] }
+  //            ← undocumented in the current spec; kept because it is the shape
+  //              confirmed working on internal clusters.
   // If all attempts return 400 (e.g. "Feature flag disabled for this device type"), soft-fail.
   async centralAssignFunction({ deviceId, serial, persona, centralToken, centralUrl }) {
     const newUrl = `https://${centralUrl}/network-config/v1alpha1/persona-assignment/${persona}`;
@@ -975,13 +1105,18 @@ const liveApi = {
     if (type.includes('SWITCH')) persona = 'ACCESS_SWITCH';
     else if (type === 'GATEWAY' || type === 'GW') persona = 'BRANCH_GW';
 
+    // /network-monitoring/v1/* is current; v1alpha1 kept as fallback for older clusters.
     const monPaths = [];
-    if (type === 'AP' || type === 'IAP') monPaths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
-    else if (type.includes('SWITCH'))   monPaths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
-    else if (type === 'GATEWAY' || type === 'GW') monPaths.push(`/network-monitoring/v1alpha1/gateways/${encodeURIComponent(serial)}`);
+    const monFor = kind => [
+      `/network-monitoring/v1/${kind}/${encodeURIComponent(serial)}`,
+      `/network-monitoring/v1alpha1/${kind}/${encodeURIComponent(serial)}`,
+    ];
+    if (type === 'AP' || type === 'IAP') monPaths.push(...monFor('aps'));
+    else if (type.includes('SWITCH'))   monPaths.push(...monFor('switches'));
+    else if (type === 'GATEWAY' || type === 'GW') monPaths.push(...monFor('gateways'));
     // Generic fallbacks
-    monPaths.push(`/network-monitoring/v1alpha1/aps/${encodeURIComponent(serial)}`);
-    monPaths.push(`/network-monitoring/v1alpha1/switches/${encodeURIComponent(serial)}`);
+    monPaths.push(...monFor('aps'));
+    monPaths.push(...monFor('switches'));
 
     // Step 1: fetch deviceName from monitoring API (read-only)
     let monData = null;
@@ -998,16 +1133,53 @@ const liveApi = {
     }
 
     // Step 2: discover the numeric scope_id needed for config PATCH.
-    // The config layer uses a large integer scope_id stored as scopeId/scopeName pairs
-    // in /network-config/v1alpha1/devices — scopeName equals the device's serial number.
-    // Note: ?serial= query param does NOT filter the results; we fetch all and match client-side.
+    // The config layer uses a large integer scope_id.
+    //
+    // Primary: GET /network-monitoring/v1/device-inventory?filter=serialNumber eq '<SERIAL>'
+    // This is the documented lookup (operationId getDeviceInventoryV1) and supports a real
+    // server-side filter. Response items carry scopeId, deviceFunction and isProvisioned.
+    // NOTE: items[].id is the SERIAL, not the scope ID — only scopeId is the scope ID.
+    // Docs: developer.arubanetworks.com/new-central/reference/getdeviceinventoryv1
+    //
+    // Fallback: the older /network-config/v1alpha1/devices?serial= call, which is
+    // undocumented and ignores the serial filter (returns everything, matched client-side).
     let numericScopeId = null;
+    let invProvisioned = null;
 
-    // The /network-config/v1alpha1/devices API requires a ?serial= param to return 200
-    // (it ignores the value and returns all devices, but omitting it triggers a 400).
-    // Each item in the list has scopeName (= device serial) and scopeId (= numeric config ID).
-    // We match by scopeName to find the target device's scopeId.
     try {
+      const filter = encodeURIComponent(`serialNumber eq '${serial}'`);
+      const res = await proxyCall({
+        url: `https://${centralUrl}/network-monitoring/v1/device-inventory?filter=${filter}&limit=1`,
+        token: centralToken,
+      });
+      console.log('[centralGetSystemInfo] device-inventory →', res.status);
+      if (res.ok) {
+        const d = await res.json();
+        const items = d.items || [];
+        const match = items.find(i =>
+          String(i.serialNumber || '').toUpperCase() === serial.toUpperCase()
+        ) || items[0];
+        if (match) {
+          console.log('[centralGetSystemInfo] inventory match:', JSON.stringify(match));
+          if (match.scopeId) numericScopeId = String(match.scopeId);
+          invProvisioned = match.isProvisioned ?? null;
+          // The inventory's deviceFunction is a human-readable label ("Campus Access
+          // Point"); the config API wants the persona code. Prefer it over the
+          // device-type guess when we can map it.
+          const fn = match.deviceFunction && match.deviceFunction !== '-' ? match.deviceFunction : null;
+          const mapped = fn ? DEVICE_FUNCTION_LABEL_TO_PERSONA[fn.toLowerCase()] : null;
+          if (mapped) {
+            console.log('[centralGetSystemInfo] persona from inventory:', fn, '→', mapped);
+            persona = mapped;
+          }
+        }
+      }
+    } catch (e) { console.warn('[centralGetSystemInfo] device-inventory fail:', e.message); }
+
+    // Fallback: undocumented config devices list. Requires a ?serial= param to return
+    // 200 (it ignores the value and returns all devices, but omitting it triggers a 400).
+    // Each item has scopeName (= device serial) and scopeId (= numeric config ID).
+    if (!numericScopeId) try {
       const res = await proxyCall({
         url: `https://${centralUrl}/network-config/v1alpha1/devices?serial=${encodeURIComponent(serial)}`,
         token: centralToken,
@@ -1016,13 +1188,10 @@ const liveApi = {
       if (res.ok) {
         const d = await res.json();
         const items = d.items || d.devices || (Array.isArray(d) ? d : []);
-        // Log ALL scopeNames so we can confirm which devices are in the list
-        console.log('[centralGetSystemInfo] config devices scopeNames:', items.map(i => i.scopeName).join(', '));
         const match = items.find(item =>
           String(item.scopeName || item.serialNumber || item.serial || '').toUpperCase() === serial.toUpperCase()
         );
         if (match) {
-          // Log full match so we can see every field and confirm the correct scopeId
           console.log('[centralGetSystemInfo] matched device:', JSON.stringify(match));
           const raw = match.scope_id || match.scopeId || match.uid || match.id;
           if (raw && /^\d+$/.test(String(raw))) {
@@ -1034,26 +1203,28 @@ const liveApi = {
         }
       } else {
         const errTxt = await res.clone().text().catch(() => '');
-        console.warn('[centralGetSystemInfo] config devices 400 body:', errTxt.slice(0, 200));
+        console.warn('[centralGetSystemInfo] config devices error body:', errTxt.slice(0, 200));
       }
     } catch (e) { console.warn('[centralGetSystemInfo] config devices fail:', e.message); }
 
     // Step 3: now that we have the numeric scopeId, read the system-info record.
-    // Include persona + object_type=LOCAL so we read the device-level config layer.
+    // Documented shape first: the named profile with hyphenated params, per the spec and
+    // HPE's own rename-hostnames reference script, which uses sys-system-info-profile.
     let sysInfo = null;
     if (numericScopeId) {
-      const siParamSets = [
-        `scope-id=${encodeURIComponent(numericScopeId)}&persona=${persona}&object_type=LOCAL&view-type=LOCAL`,
-        `scope-id=${encodeURIComponent(numericScopeId)}&persona=${persona}&view-type=LOCAL`,
-        `scope-id=${encodeURIComponent(numericScopeId)}&view-type=LOCAL`,
+      const scoped = `scope-id=${encodeURIComponent(numericScopeId)}&device-function=${persona}&object-type=LOCAL`;
+      const siUrls = [
+        `/network-config/v1alpha1/system-info/${SYS_INFO_PROFILE}?${scoped}&view-type=LOCAL`,
+        // Legacy collection-level shape (underscored object_type, persona) — the form
+        // previously confirmed working on live clusters.
+        `/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(numericScopeId)}&persona=${persona}&object_type=LOCAL&view-type=LOCAL`,
+        `/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(numericScopeId)}&persona=${persona}&view-type=LOCAL`,
+        `/network-config/v1alpha1/system-info?scope-id=${encodeURIComponent(numericScopeId)}&view-type=LOCAL`,
       ];
-      for (const params of siParamSets) {
+      for (const path of siUrls) {
         try {
-          const res = await proxyCall({
-            url: `https://${centralUrl}/network-config/v1alpha1/system-info?${params}`,
-            token: centralToken,
-          });
-          console.log(`[centralGetSystemInfo] system-info GET ?${params} →`, res.status);
+          const res = await proxyCall({ url: `https://${centralUrl}${path}`, token: centralToken });
+          console.log(`[centralGetSystemInfo] system-info GET ${path} →`, res.status);
           if (res.ok) {
             sysInfo = await res.json();
             console.log('[centralGetSystemInfo] system-info record:', JSON.stringify(sysInfo));
@@ -1066,25 +1237,11 @@ const liveApi = {
       }
     }
 
-    console.log('[centralGetSystemInfo] numericScopeId:', numericScopeId, '| persona:', persona, '| deviceName:', monData?.deviceName);
+    console.log('[centralGetSystemInfo] numericScopeId:', numericScopeId, '| persona:', persona, '| provisioned:', invProvisioned, '| deviceName:', monData?.deviceName);
     if (!monData && !numericScopeId) return null;
-    return { ...(monData || {}), _scopeId: numericScopeId, _persona: persona, _sysInfo: sysInfo };
+    return { ...(monData || {}), _scopeId: numericScopeId, _persona: persona, _sysInfo: sysInfo, _provisioned: invProvisioned };
   },
 
-  // Central: set/update device hostname via the config API.
-  // Endpoint: /network-config/v1alpha1/system-info?scope-id={numericId}
-  //
-  // Two cases:
-  // Set hostname on an Aruba device via the New Central network-config API.
-  //
-  // The correct approach (from HPE pycentral v2 workflows):
-  //   - POST /network-config/v1alpha1/system-info?scope-id=<id>&persona=<PERSONA>&object_type=LOCAL
-  //     when no hostname exists on the device
-  //   - PATCH same URL when a hostname already exists
-  //   Body is always: { "hostname": "<value>" }
-  //
-  // The persona param (CAMPUS_AP, ACCESS_SWITCH, BRANCH_GW…) is REQUIRED — without it,
-  // the API returns 200 but silently ignores the change (wrong config layer targeted).
   // Central: fetch live device stats from the monitoring API.
   // Returns status, uptime, firmware, client count, IP, and radio details.
   // Tries device-type-specific endpoints; returns null if device not found or Central unavailable.
@@ -1175,36 +1332,30 @@ const liveApi = {
       const type = (deviceType || '').toUpperCase();
       let paths = [];
       const s = encodeURIComponent(serial);
+      // New Central (network-monitoring) only. The Classic /monitoring/v1 and
+      // /monitoring/v2 device endpoints were removed — they read from the Classic
+      // management plane, so on a New Central workspace they return stale or empty
+      // data while looking authoritative.
       if (type === 'AP' || type === 'IAP') {
         paths = [
-          `/network-monitoring/v1/aps/${s}`,         // internal/HPE cluster v1 (confirmed)
-          `/network-monitoring/v1alpha1/aps/${s}`,   // internal/HPE cluster v1alpha1 (fallback)
-          `/monitoring/v1/aps?serial=${s}`,           // standard cluster v1 query param
-          `/monitoring/v2/aps?serial=${s}`,
-          `/monitoring/v1/aps/${s}`,
+          `/network-monitoring/v1/aps/${s}`,
+          `/network-monitoring/v1alpha1/aps/${s}`,
         ];
       } else if (type === 'SWITCH') {
         paths = [
           `/network-monitoring/v1/switches/${s}`,
           `/network-monitoring/v1alpha1/switches/${s}`,
-          `/monitoring/v1/switches?serial=${s}`,
-          `/monitoring/v2/switches?serial=${s}`,
-          `/monitoring/v1/switches/${s}`,
         ];
       } else if (type === 'GATEWAY') {
         paths = [
           `/network-monitoring/v1/gateways/${s}`,
           `/network-monitoring/v1alpha1/gateways/${s}`,
-          `/monitoring/v1/gateways?serial=${s}`,
-          `/monitoring/v2/gateways?serial=${s}`,
-          `/monitoring/v1/gateways/${s}`,
         ];
       } else {
         paths = [
           `/network-monitoring/v1/aps/${s}`,
-          `/monitoring/v1/aps?serial=${s}`,
-          `/monitoring/v1/switches?serial=${s}`,
-          `/monitoring/v1/gateways?serial=${s}`,
+          `/network-monitoring/v1/switches/${s}`,
+          `/network-monitoring/v1/gateways/${s}`,
         ];
       }
       for (const path of paths) {
@@ -1301,49 +1452,170 @@ const liveApi = {
     return items;
   },
 
+  // Central: resolve a device's config scope ID (and persona) by serial.
+  //
+  // Split out from centralGetSystemInfo so it can be re-run at hostname-write time.
+  // A device added moments ago has no scope ID until Central finishes provisioning it,
+  // which happens only after site + function assignment — so the value captured when
+  // the Hostname screen first loaded is null for new devices and must be re-fetched.
+  //
+  // `attempts`/`delayMs` add backoff for exactly that case: provisioning is not
+  // instantaneous, so we poll briefly rather than giving up on the first miss.
+  async centralResolveDeviceScope({ serial, centralToken, centralUrl, attempts = 1, delayMs = 5000 }) {
+    const out = { scopeId: null, persona: null, provisioned: null };
+
+    for (let i = 0; i < attempts; i++) {
+      if (i > 0) {
+        console.log(`[centralResolveDeviceScope] retry ${i}/${attempts - 1} in ${delayMs}ms…`);
+        await delay(delayMs);
+      }
+
+      // Primary: documented inventory lookup with a real server-side filter.
+      try {
+        const filter = encodeURIComponent(`serialNumber eq '${serial}'`);
+        const res = await proxyCall({
+          url: `https://${centralUrl}/network-monitoring/v1/device-inventory?filter=${filter}&limit=1`,
+          token: centralToken,
+        });
+        if (res.ok) {
+          const d = await res.json();
+          const items = d.items || [];
+          const match = items.find(x =>
+            String(x.serialNumber || '').toUpperCase() === serial.toUpperCase()
+          ) || items[0];
+          if (match) {
+            if (match.scopeId) out.scopeId = String(match.scopeId);
+            out.provisioned = match.isProvisioned ?? null;
+            const fn = match.deviceFunction && match.deviceFunction !== '-' ? match.deviceFunction : null;
+            const mapped = fn ? DEVICE_FUNCTION_LABEL_TO_PERSONA[fn.toLowerCase()] : null;
+            if (mapped) out.persona = mapped;
+          }
+        }
+      } catch (e) { console.warn('[centralResolveDeviceScope] inventory fail:', e.message); }
+
+      // Fallback: undocumented config devices list (ignores the serial filter).
+      if (!out.scopeId) try {
+        const res = await proxyCall({
+          url: `https://${centralUrl}/network-config/v1alpha1/devices?serial=${encodeURIComponent(serial)}`,
+          token: centralToken,
+        });
+        if (res.ok) {
+          const d = await res.json();
+          const items = d.items || d.devices || (Array.isArray(d) ? d : []);
+          const match = items.find(item =>
+            String(item.scopeName || item.serial || '').toUpperCase() === serial.toUpperCase()
+          );
+          if (match?.scopeId) out.scopeId = String(match.scopeId);
+        }
+      } catch (e) { console.warn('[centralResolveDeviceScope] config devices fail:', e.message); }
+
+      if (out.scopeId) {
+        console.log(`[centralResolveDeviceScope] resolved scopeId=${out.scopeId} persona=${out.persona} provisioned=${out.provisioned} (attempt ${i + 1})`);
+        return out;
+      }
+    }
+
+    console.warn(`[centralResolveDeviceScope] no scope ID for ${serial} after ${attempts} attempt(s)`);
+    return out;
+  },
+
+  // Central: set/update device hostname via the config API.
+  //
+  // Primary (documented): the named profile resource
+  //   PATCH /network-config/v1alpha1/system-info/sys-system-info-profile   (update)
+  //   POST  /network-config/v1alpha1/system-info/sys-system-info-profile   (create)
+  //   ?object-type=LOCAL&scope-id=<deviceScopeId>&device-function=<PERSONA>
+  //   PATCH body: { hostname }      POST body: { name, hostname }
+  //
+  // object-type=LOCAL targets this one device; SHARED (the default when omitted) would
+  // write a reusable library object instead, so scope-id and device-function are both
+  // mandatory here. Param names are hyphenated per the spec. scope-id is the DEVICE's
+  // own scope ID, not the site's.
+  // Docs: developer.arubanetworks.com/new-central-config/reference/updatesysteminfoprofilebyid
+  // Reference impl: github.com/aruba/central-python-workflows (rename-hostnames)
+  //
+  // Fallback: the collection-level shape with underscored params that this app used
+  // previously and which is confirmed working on live clusters. Kept because the
+  // documented shape above has not been verified against a live tenant.
+  //
+  // There is no v1 of system-info as of 2026-10 — HPE's own pycentral SDK still pins
+  // network-config to v1alpha1 — so the alpha path is current, not legacy.
+  //
+  // Preconditions (per HPE's reference script): the device must be provisioned in
+  // Central and have a persona assigned. It does NOT need to be online.
   async centralSetHostname({ serial, hostname, hostnameExists, scopeId, persona, deviceType, centralToken, centralUrl }) {
     const errors = [];
 
-    if (!scopeId) {
-      console.warn('[centralSetHostname] no numeric scope_id — cannot update');
-      throw new Error('Hostname update failed — device scope ID not found. Assign hostname manually in Aruba Central.');
+    // A device added during this run has no scope ID yet when the Hostname screen
+    // loads — it only gets one once site + function assignment have provisioned it.
+    // Those steps run immediately before this one, so re-resolve here, with backoff
+    // to let provisioning settle. This is what makes hostname work on brand-new devices.
+    let resolvedScopeId = scopeId;
+    let lookupPersona = null;
+    if (!resolvedScopeId) {
+      console.log('[centralSetHostname] no scope ID yet — resolving after provisioning…');
+      const r = await liveApi.centralResolveDeviceScope({
+        serial, centralToken, centralUrl, attempts: 5, delayMs: 5000,
+      });
+      resolvedScopeId = r.scopeId;
+      lookupPersona = r.persona;
     }
 
-    const resolvedPersona = persona || 'CAMPUS_AP';
-    const baseUrl = `https://${centralUrl}/network-config/v1alpha1/system-info` +
-      `?scope-id=${encodeURIComponent(scopeId)}&persona=${resolvedPersona}&object_type=LOCAL`;
+    if (!resolvedScopeId) {
+      console.warn('[centralSetHostname] no numeric scope_id — cannot update');
+      const err = new Error(
+        'Hostname not set — Central has not finished provisioning this device yet.\n\n'
+        + 'The device was added and assigned successfully. Once it appears in Central '
+        + '(usually a few minutes), set the hostname from the device status screen or in Aruba Central.'
+      );
+      // Not a failure of the onboarding run — everything else succeeded.
+      err.softFail = true;
+      throw err;
+    }
 
-    // Central YANG model: hostname is nested inside a 'profile' container.
-    // As of 2026-05-21, 'sys-system-info-profile' is the correct name for all device types.
-    // Previously APs used 'default_sys_info' — keep as second attempt for older clusters.
-    // Fall back to flat { hostname } for any standard Central clusters that haven't updated.
-    const bodies = [
-      { profile: [{ name: 'sys-system-info-profile', hostname }] },  // Current Central (all types)
-      { profile: [{ name: 'default_sys_info',         hostname }] },  // Legacy AP profile name
-      { hostname },                                                     // Flat fallback (older Central)
+    // A freshly-resolved persona comes from the device's own record, so prefer it
+    // over the value captured earlier or the device-type guess.
+    const resolvedPersona = lookupPersona || persona || 'CAMPUS_AP';
+    console.log(`[centralSetHostname] scope_id=${resolvedScopeId} persona=${resolvedPersona} hostnameExists=${hostnameExists}`);
+
+    const scoped = `scope-id=${encodeURIComponent(resolvedScopeId)}&device-function=${resolvedPersona}&object-type=LOCAL`;
+    const namedUrl = `https://${centralUrl}/network-config/v1alpha1/system-info/${SYS_INFO_PROFILE}?${scoped}`;
+    const legacyUrl = `https://${centralUrl}/network-config/v1alpha1/system-info` +
+      `?scope-id=${encodeURIComponent(resolvedScopeId)}&persona=${resolvedPersona}&object_type=LOCAL`;
+
+    // When a hostname already exists, update first; otherwise create first.
+    // Both orders are tried in case hostnameExists was detected incorrectly.
+    const namedMethods = hostnameExists ? ['PATCH', 'POST'] : ['POST', 'PATCH'];
+    const attempts = namedMethods.map(method => ({
+      label: `named+${method}`,
+      url: namedUrl,
+      method,
+      body: method === 'POST' ? { name: SYS_INFO_PROFILE, hostname } : { hostname },
+    }));
+
+    // Legacy fallback: the Central YANG model nests hostname inside a 'profile'
+    // container. 'sys-system-info-profile' is correct for all device types;
+    // 'default_sys_info' was the older AP-only profile name.
+    const legacyBodies = [
+      { profile: [{ name: SYS_INFO_PROFILE, hostname }] },
+      { profile: [{ name: 'default_sys_info', hostname }] },
+      { hostname },
     ];
-
-    // When no hostname is set, POST to create; when one exists, PATCH to update.
-    // Always try both in case hostnameExists was detected incorrectly.
-    const methods = hostnameExists ? ['PATCH', 'POST'] : ['POST', 'PATCH'];
-
-    console.log(`[centralSetHostname] scope_id=${scopeId} persona=${resolvedPersona} hostnameExists=${hostnameExists}`);
-
-    for (const body of bodies) {
-      for (const method of methods) {
-        try {
-          console.log(`[centralSetHostname] ${method} ${baseUrl}`, JSON.stringify(body));
-          const res = await proxyCall({ url: baseUrl, method, token: centralToken, body });
-          const txt = !res.ok ? await res.clone().text() : '';
-          console.log(`[centralSetHostname] ${method} →`, res.status, txt || 'OK');
-          if (res.ok) return res.json().catch(() => ({ success: true }));
-          errors.push(`${method}+${Object.keys(body)[0]} → ${res.status}: ${txt.slice(0, 200)}`);
-        } catch (e) { errors.push(`${method} → ${e.message}`); }
+    for (const body of legacyBodies) {
+      for (const method of namedMethods) {
+        attempts.push({ label: `legacy+${method}+${Object.keys(body)[0]}`, url: legacyUrl, method, body });
       }
-      // If the first body format succeeded for any method we'd have returned already.
-      // If all methods failed for this body format with "not found as child", move on.
-      const allNotFound = errors.every(e => e.includes('not found'));
-      if (!allNotFound) break; // Non-schema error — don't try more body formats
+    }
+
+    for (const a of attempts) {
+      try {
+        console.log(`[centralSetHostname] ${a.label} ${a.method} ${a.url}`, JSON.stringify(a.body));
+        const res = await proxyCall({ url: a.url, method: a.method, token: centralToken, body: a.body });
+        const txt = !res.ok ? await res.clone().text() : '';
+        console.log(`[centralSetHostname] ${a.label} →`, res.status, txt || 'OK');
+        if (res.ok) return res.json().catch(() => ({ success: true }));
+        errors.push(`${a.label} → ${res.status}: ${txt.slice(0, 200)}`);
+      } catch (e) { errors.push(`${a.label} → ${e.message}`); }
     }
 
     throw new Error(`Hostname update failed.\n${errors.join('\n')}`);
@@ -1398,6 +1670,7 @@ const demoApi = {
     { id: 'app-central-prod', name: 'HPE Aruba Networking Central', region: 'us-west', regionName: 'US West', standalonesupported: true },
     { id: 'app-uxi',          name: 'HPE UXI',                      region: 'us-west', regionName: 'US West', standalonesupported: true },
   ]; },
+  async _glFetchServiceManagerName({ smId }) { await delay(200); return smId === 'app-uxi' ? 'HPE UXI' : 'HPE Aruba Networking Central'; },
   async glGetApplicationRegions() { await delay(400); return [
     { id: 'us-west', name: 'US West' },
     { id: 'eu-west', name: 'EU West' },
@@ -1471,32 +1744,50 @@ const demoApi = {
 };
 
 // ── BARCODE PARSER ─────────────────────────────────────────────────────────────
-function normaliseMac(hex) {
-  return hex.replace(/[:\-]/g,'').replace(/(.{2})/g,'$1:').slice(0,-1).toUpperCase();
+// Accepts any common MAC rendering and returns canonical "AA:BB:CC:DD:EE:FF",
+// or null if the input isn't 12 hex digits. Handles bare hex (000B86B86418),
+// colons, hyphens, Cisco dotted-quad (000b.86b8.6418) and embedded spaces —
+// GreenLake requires the colon form and rejects everything else.
+function normaliseMac(raw) {
+  const hex = String(raw || '').replace(/[^0-9A-Fa-f]/g, '').toUpperCase();
+  if (hex.length !== 12) return null;
+  return hex.match(/.{2}/g).join(':');
 }
+
+// Progressive formatter for text inputs: inserts colons as the user types and
+// ignores any separator they supply themselves. Tolerates partial input, so it
+// can run on every keystroke without fighting the user mid-entry.
+function formatMacInput(raw) {
+  const hex = String(raw || '').replace(/[^0-9A-Fa-f]/g, '').toUpperCase().slice(0, 12);
+  return hex.replace(/(.{2})/g, '$1:').replace(/:$/, '');
+}
+
 function parseBarcode(raw) {
   raw = raw.trim();
   // Combined: "SN:XXXXX;MAC:XX:XX:XX:XX:XX:XX"
-  let m = raw.match(/SN[:\s]+([A-Z0-9]+)[;\s,]+MAC[:\s]+([0-9A-Fa-f:]{17})/i);
-  if (m) return { serial: m[1].toUpperCase(), mac: m[2].toUpperCase() };
+  let m = raw.match(/SN[:\s]+([A-Z0-9]+)[;\s,]+MAC[:\s]+([0-9A-Fa-f:.\-]{12,17})/i);
+  if (m) return { serial: m[1].toUpperCase(), mac: normaliseMac(m[2]) };
   // Combined: "SERIAL/MACRAW12HEX"
   m = raw.match(/^([A-Z0-9]{8,14})\/([0-9A-Fa-f]{12})$/i);
   if (m) return { serial: m[1].toUpperCase(), mac: normaliseMac(m[2]) };
   // Combined: "serial=xxx mac=xxx"
   const serialM = raw.match(/serial[=:\s]+([A-Z0-9]{8,14})/i);
   if (serialM) {
-    const macM = raw.match(/mac[=:\s]+([0-9A-Fa-f:]{17})/i);
-    return { serial: serialM[1].toUpperCase(), mac: macM ? macM[1].toUpperCase() : null };
+    const macM = raw.match(/mac[=:\s]+([0-9A-Fa-f:.\-]{12,17})/i);
+    return { serial: serialM[1].toUpperCase(), mac: macM ? normaliseMac(macM[1]) : null };
   }
   // MAC-only: bare 12 hex chars e.g. "000B86B86418"
   m = raw.match(/^([0-9A-Fa-f]{12})$/i);
   if (m) return { serial: null, mac: normaliseMac(m[1]) };
-  // MAC-only: colon/dash separated e.g. "00:0B:86:B8:64:18"
+  // MAC-only: colon/hyphen separated e.g. "00:0B:86:B8:64:18" or "00-0B-86-B8-64-18"
   m = raw.match(/^([0-9A-Fa-f]{2}[:\-]){5}[0-9A-Fa-f]{2}$/i);
-  if (m) return { serial: null, mac: raw.replace(/-/g,':').toUpperCase() };
+  if (m) return { serial: null, mac: normaliseMac(raw) };
+  // MAC-only: Cisco dotted-quad e.g. "000b.86b8.6418"
+  m = raw.match(/^([0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4}$/i);
+  if (m) return { serial: null, mac: normaliseMac(raw) };
   // MAC-only: prefixed "MAC:000B86B86418"
-  m = raw.match(/^MAC[:\s]+([0-9A-Fa-f]{12,17})$/i);
-  if (m) return { serial: null, mac: normaliseMac(m[1].replace(/[:\-]/g,'')) };
+  m = raw.match(/^MAC[:\s]+([0-9A-Fa-f:.\- ]{12,17})$/i);
+  if (m) return { serial: null, mac: normaliseMac(m[1]) };
   // Serial-only
   m = raw.match(/^([A-Z0-9]{8,14})$/i);
   if (m) return { serial: m[1].toUpperCase(), mac: null };
@@ -1593,7 +1884,7 @@ const ProgressSteps = ({ step, total }) => (
 
 const ErrorBanner = ({ msg, onRetry }) => (
   <div className="bg-red-500 bg-opacity-10 border border-red-500 border-opacity-30 rounded-2xl p-4 space-y-3">
-    <p className="text-red-400 text-sm">{msg}</p>
+    <p className="text-red-400 text-sm whitespace-pre-line">{msg}</p>
     {onRetry && <button onClick={onRetry} className="text-red-400 text-xs underline">Try again</button>}
   </div>
 );
@@ -2066,7 +2357,8 @@ const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
     }
   }, [settings.scanConfirm, processScan]);
 
-  const canContinue = fields.serial.trim().length > 0 && fields.mac.trim().length > 0;
+  const macValid = !!normaliseMac(fields.mac);
+  const canContinue = fields.serial.trim().length > 0 && macValid;
 
   // Hint text tells the user what's still missing
   const hint = !fields.serial && !fields.mac ? 'Scan one barcode at a time — S/N or MAC, either order'
@@ -2156,18 +2448,27 @@ const ScanScreen = ({ settings, onScanned, onOpenSettings }) => {
         </div>
         <div className="space-y-1.5">
           <label className="text-xs font-semibold uppercase tracking-wider flex items-center gap-2"
-            style={{ color: fields.mac ? '#10b981' : '#6b7280' }}>
-            MAC Address {fields.mac && <span className="text-emerald-500 text-base leading-none">✓</span>}
+            style={{ color: macValid ? '#10b981' : '#6b7280' }}>
+            MAC Address {macValid && <span className="text-emerald-500 text-base leading-none">✓</span>}
           </label>
           <input value={fields.mac}
-            onChange={e => setFields(p => ({ ...p, mac: e.target.value.toUpperCase() }))}
+            onChange={e => setFields(p => ({ ...p, mac: formatMacInput(e.target.value) }))}
+            inputMode="text"
+            autoCapitalize="characters"
+            autoCorrect="off"
+            spellCheck={false}
             placeholder="e.g. 00:0B:86:B8:64:18"
             className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm font-mono transition-colors" />
+          {fields.mac && !macValid && (
+            <p className="text-amber-400 text-xs">
+              {fields.mac.replace(/[^0-9A-F]/gi, '').length}/12 hex characters — colons are added automatically
+            </p>
+          )}
         </div>
       </Card>
 
       <Btn
-        onClick={() => onScanned({ serial: fields.serial.trim(), mac: fields.mac.trim() || null }, null)}
+        onClick={() => onScanned({ serial: fields.serial.trim(), mac: normaliseMac(fields.mac) }, null)}
         disabled={!canContinue}>
         Continue →
       </Btn>
@@ -2833,10 +3134,6 @@ const SiteScreen = ({ settings, api, onSelect, onSkip, initialId }) => {
         <h2 className="text-white font-bold text-xl">Assign Site</h2>
         <p className="text-gray-400 text-sm">Where is this device being installed?</p>
       </div>
-      <div className="flex items-start gap-2 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-xl px-4 py-3">
-        <span className="text-amber-400 text-sm shrink-0">⚠</span>
-        <p className="text-amber-300 text-xs leading-relaxed">Site assignment in New Central is coming soon. Select a site for reference — Please assign manually in Aruba Central Classic.</p>
-      </div>
       <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search sites…"
         className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-4 py-3 text-white placeholder-gray-600 focus:outline-none focus:border-emerald-500 text-sm" />
       {loading && <Spinner />}
@@ -2948,9 +3245,7 @@ const DeviceFoundScreen = ({ summary, settings, api, onViewStatus, onProvision, 
 
     // Application name — fetch service manager by ID
     const appPromise = summary.currentApplicationId
-      ? proxyCall({ url: `${GL_BASE}/service-catalog/v1beta1/service-managers/${summary.currentApplicationId}`, token })
-          .then(r => r.ok ? r.json() : null)
-          .then(d => d?.name || null)
+      ? api._glFetchServiceManagerName({ smId: summary.currentApplicationId, token })
           .catch(() => null)
       : Promise.resolve(null);
 
@@ -3725,11 +4020,6 @@ const HostnameScreen = ({ settings, api, deviceType, serial, onNext, onSkip }) =
         <p className="text-gray-400 text-sm">Set a name for this device in Aruba Central</p>
       </div>
 
-      <div className="flex items-start gap-3 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-2xl px-4 py-3">
-        <span className="text-amber-400 text-lg shrink-0">⚠️</span>
-        <p className="text-amber-300 text-xs leading-relaxed">Hostname assignment requires the device to already be provisioned in New Central with a site assigned. If this device was just added, set the hostname manually in Aruba Central for now — full API support is coming soon.</p>
-      </div>
-
       {loading ? <Spinner /> : (
         <>
           {currentHostname && (
@@ -3791,7 +4081,7 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
     attributes: (hasTags || hasContact) ? 'pending' : 'skipped',
     subscription: summary.subscription ? 'pending' : 'skipped',
     application: 'pending',
-    site: isUxi ? 'skipped' : 'pending',
+    site: (isUxi || !summary.site) ? 'skipped' : 'pending',
     function: (isUxi || !summary.deviceFunction) ? 'skipped' : 'pending',
     hostname: (isUxi || !summary.hostname) ? 'skipped' : 'pending',
   });
@@ -3856,9 +4146,31 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
         );
       }
       if (!isUxi) {
-        // Site assignment API not available on any cluster — skip silently.
-        // The site dropdown is kept in the UI for reference but no API call is made.
-        set('site', 'skipped');
+        // Site assignment — New Central scope-management API.
+        // Soft-fails (hybrid Classic/New accounts don't support it) without blocking.
+        if (summary.site?.id) {
+          const sameSite = summary.foundExisting && summary.currentSiteId
+            && String(summary.site.id) === String(summary.currentSiteId);
+          if (sameSite) {
+            console.log('[provision] site unchanged — skipping Central assign');
+            set('site', 'skipped');
+          } else {
+            set('site', 'loading');
+            try {
+              await api.centralAssignSite({ serial: summary.serial, siteId: summary.site.id, siteSource: summary.site._source, ...settings, centralUrl });
+              set('site', 'success');
+            } catch (siteErr) {
+              if (siteErr.softFail) {
+                set('site', 'skipped');
+                setErrorMsg(prev => [prev, siteErr.message].filter(Boolean).join('\n'));
+              } else {
+                throw siteErr;
+              }
+            }
+          }
+        } else {
+          set('site', 'skipped');
+        }
         if (summary.deviceFunction) {
           set('function', 'loading');
           try {
@@ -3880,7 +4192,9 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
             set('hostname', 'success');
           } catch (hnErr) {
             set('hostname', 'skipped');
-            setErrorMsg(prev => [prev, 'Hostname could not be set — assign manually in Aruba Central'].filter(Boolean).join('\n'));
+            // Surface the real reason — it distinguishes "still provisioning, try
+            // again shortly" from an actual API rejection.
+            setErrorMsg(prev => [prev, hnErr.message || 'Hostname could not be set — assign manually in Aruba Central'].filter(Boolean).join('\n'));
           }
         }
       }
@@ -3950,6 +4264,45 @@ const ReviewScreen = ({ summary, settings, api, onDone, onBack }) => {
 };
 
 // ── SCREEN: SUCCESS ───────────────────────────────────────────────────────────
+// Reminder that configuration-group assignment still has to happen in Classic Central.
+//
+// New Central has no usable API for this today. Its own device-groups endpoints exist
+// (GET /network-config/v1/device-groups reads fine, and only ever returns groups that
+// already have New Central Config enabled), but the matching write —
+// POST /network-config/v1/device-groups-add-devices — is rejected on hybrid tenants with
+// {"message":"API_ACCESS_RESTRICTED_IN_HYBRID_CLUSTER"}. Verified against a real scope ID,
+// on both v1 and v1alpha1. The Classic endpoints that would work
+// (configuration/v1/devices/move, configuration/v1/preassign) live on a different gateway
+// (apigw-*.central.arubanetworks.com) and require separate Classic credentials — HPE
+// documents that "tokens for Central will not work with Classic Central, and vice versa",
+// which a live probe confirmed with a 401 invalid_token.
+//
+// So the step is deliberately not automated: we tell the operator instead of silently
+// leaving the device half-provisioned. Delete this component (and its two call sites) once
+// device-groups-add-devices is permitted, at which point the step can be done in-app.
+const ClassicGroupNote = ({ plural = false }) => (
+  <div className="space-y-2">
+    <div className="flex items-start gap-3 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-2xl px-4 py-3">
+      <span className="text-amber-400 text-lg shrink-0">⚠️</span>
+      <div className="space-y-1">
+        <p className="text-amber-300 text-sm font-semibold">
+          Final step: assign a configuration group
+        </p>
+        <p className="text-amber-300 text-sm text-opacity-90">
+          {plural ? 'These devices are' : 'This device is'} onboarded, but {plural ? 'their' : 'its'} configuration
+          isn't managed by New Central yet. In <span className="font-semibold">Classic Central</span>, move
+          {plural ? ' them' : ' it'} into a group that has <span className="font-semibold">New Central Config enabled</span>.
+          Until then {plural ? 'they stay' : 'it stays'} in the <span className="font-mono">default</span> group and
+          {plural ? ' remain' : ' remains'} Classic-managed.
+        </p>
+      </div>
+    </div>
+    <p className="text-gray-500 text-xs px-1">
+      This Classic Central step is required today and is expected to go away as New Central takes over group management.
+    </p>
+  </div>
+);
+
 const SuccessScreen = ({ summary, onAnother }) => (
   <div className="p-5 space-y-6 step-enter">
     <div className="flex flex-col items-center pt-10 pb-4 space-y-4">
@@ -3975,6 +4328,7 @@ const SuccessScreen = ({ summary, onAnother }) => (
         </div>
       ))}
     </Card>
+    <ClassicGroupNote />
     <Btn onClick={onAnother}>📡 Onboard Another Device</Btn>
   </div>
 );
@@ -4218,19 +4572,31 @@ const BatchScanScreen = ({ settings, api, onDone, onBack, onOpenSettings }) => {
             />
             <input
               value={manualMac}
-              onChange={e => setManualMac(e.target.value.toUpperCase())}
+              onChange={e => setManualMac(formatMacInput(e.target.value))}
+              inputMode="text"
+              autoCapitalize="characters"
+              autoCorrect="off"
+              spellCheck={false}
               placeholder="MAC address (optional)  e.g. 00:0B:86:B8:64:18"
               className="w-full bg-white bg-opacity-5 border border-white border-opacity-10 rounded-xl px-3 py-2.5 text-white placeholder-gray-700 focus:outline-none focus:border-emerald-500 text-sm font-mono transition-colors"
             />
+            {manualMac && !normaliseMac(manualMac) && (
+              <p className="text-amber-400 text-xs px-1">
+                {manualMac.replace(/[^0-9A-F]/gi, '').length}/12 hex characters — colons are added automatically
+              </p>
+            )}
             <button
               onClick={() => {
                 const s = manualSerial.trim();
                 if (s.length < 4) return;
-                addItemToQueue(s, manualMac.trim() || null);
+                // MAC is optional here, but if one was typed it must be complete —
+                // a partial MAC is rejected by GreenLake on add.
+                if (manualMac && !normaliseMac(manualMac)) return;
+                addItemToQueue(s, normaliseMac(manualMac));
                 setManualSerial('');
                 setManualMac('');
               }}
-              disabled={manualSerial.trim().length < 4}
+              disabled={manualSerial.trim().length < 4 || (!!manualMac && !normaliseMac(manualMac))}
               className="w-full py-2.5 rounded-xl text-sm font-semibold text-white bg-emerald-600 active:bg-emerald-700 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
             >
               Add to queue →
@@ -4472,12 +4838,6 @@ const BatchHostnameScreen = ({ queue, onNext, onSkip }) => {
         <p className="text-gray-400 text-sm">Optional — name devices via pattern or individually</p>
       </div>
 
-      {/* API limitation warning */}
-      <div className="flex items-start gap-3 bg-amber-500 bg-opacity-10 border border-amber-500 border-opacity-30 rounded-2xl px-4 py-3 mb-5">
-        <span className="text-amber-400 text-lg shrink-0">⚠️</span>
-        <p className="text-amber-300 text-xs leading-relaxed">Hostname assignment only works for devices already provisioned in New Central with a site assigned. Devices just added will be skipped — set those manually in Aruba Central.</p>
-      </div>
-
       {/* Skip is the easy primary action */}
       <Btn onClick={onSkip} className="mb-5">Skip →</Btn>
 
@@ -4665,7 +5025,7 @@ const BatchProvisionScreen = ({ queue, groups, shared, settings, api, onDone }) 
 
         // Site
         if (shared.site?.id) {
-          try { set('site', 'loading'); await api.centralAssignSite({ serial: item.serial, siteId: shared.site.id, ...settings }); set('site', 'success'); }
+          try { set('site', 'loading'); await api.centralAssignSite({ serial: item.serial, siteId: shared.site.id, siteSource: shared.site._source, ...settings }); set('site', 'success'); }
           catch(e) { set('site', e.softFail ? 'skipped' : 'error'); }
         } else { set('site', 'skipped'); }
 
@@ -4682,10 +5042,11 @@ const BatchProvisionScreen = ({ queue, groups, shared, settings, api, onDone }) 
           try {
             set('hostname', 'loading');
             const sysInfo = await api.centralGetSystemInfo({ serial: item.serial, deviceType: item.deviceType, ...settings });
+            // scopeId may be null for a device added moments ago — centralSetHostname
+            // re-resolves it with backoff after site/function provisioning completes.
             const scopeId = sysInfo?._scopeId || null;
-            if (!scopeId) throw Object.assign(new Error('Device not in Central yet'), { softFail: true });
             const hasExisting = !!(sysInfo?.deviceName && !/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(sysInfo.deviceName));
-            const persona = fn?.id || item.currentFunctionId || 'CAMPUS_AP';
+            const persona = fn?.id || item.currentFunctionId || sysInfo?._persona || 'CAMPUS_AP';
             await api.centralSetHostname({ serial: item.serial, hostname, hostnameExists: hasExisting, scopeId, persona, deviceType: item.deviceType, ...settings });
             set('hostname', 'success');
           } catch(e) { set('hostname', e.softFail ? 'skipped' : 'error'); }
@@ -4774,6 +5135,9 @@ const BatchSuccessScreen = ({ queue, onAnother }) => {
             <span className="text-emerald-400">✓</span>
           </div>
         ))}
+      </div>
+      <div className="mb-6">
+        <ClassicGroupNote plural={items.length !== 1} />
       </div>
       <Btn onClick={onAnother}>Onboard More Devices →</Btn>
     </div>

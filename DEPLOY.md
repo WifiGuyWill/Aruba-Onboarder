@@ -81,6 +81,7 @@ Toggle **Demo Mode** in Settings to test the full UI flow without any real API c
 
 ## Notes
 
+- Site assignment uses the New Central scope-management API (`POST /network-config/v1/site-add-devices`). HPE supports it only on **standalone New Central** and **Central On-Prem** accounts — hybrid workspaces that still show the Classic Central toggle return 403. The app soft-fails in that case: provisioning continues and the user is told to assign the site manually.
 - The proxy only allows traffic to `sso.common.cloud.hpe.com`, `global.api.greenlake.hpe.com`, and `*.api.central.arubanetworks.com` — all other domains are blocked with a 403.
 - China cluster (`cn1.api.central.arubanetworks.com.cn`) is on a separate TLD — if you deploy to China, you may need a separate Cloudflare account/zone in that region.
 - Rate limits: GreenLake enforces 25 req/min (POST), 20 req/min (PATCH), 90 req/min (async polling). The app processes one device at a time so this should never be hit.
